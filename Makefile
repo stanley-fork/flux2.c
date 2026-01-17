@@ -5,6 +5,20 @@ CC = gcc
 CFLAGS = -Wall -Wextra -O3 -march=native -ffast-math
 LDFLAGS = -lm
 
+# Platform-specific BLAS support
+UNAME_S := $(shell uname -s)
+ifeq ($(UNAME_S),Darwin)
+    # macOS: Use Accelerate framework for BLAS
+    LDFLAGS += -framework Accelerate
+endif
+ifeq ($(UNAME_S),Linux)
+    # Linux: Use OpenBLAS if available (compile with USE_OPENBLAS=1)
+    ifdef USE_OPENBLAS
+        CFLAGS += -DUSE_OPENBLAS
+        LDFLAGS += -lopenblas
+    endif
+endif
+
 # Debug build
 DEBUG_CFLAGS = -Wall -Wextra -g -O0 -DDEBUG -fsanitize=address
 

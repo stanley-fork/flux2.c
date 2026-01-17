@@ -1,14 +1,22 @@
 /*
  * FLUX Math Kernels - Implementation
  *
- * Pure C implementation of math operations for FLUX inference.
- * No external dependencies. Can be optimized with SIMD later.
+ * Math operations for FLUX inference.
+ * Uses BLAS (Accelerate on macOS, OpenBLAS on Linux) when available.
  */
 
 #include "flux_kernels.h"
 #include <math.h>
 #include <string.h>
 #include <stdlib.h>
+
+/* Use BLAS for matrix operations when available */
+#ifdef __APPLE__
+#define USE_ACCELERATE
+#include <Accelerate/Accelerate.h>
+#elif defined(USE_OPENBLAS)
+#include <cblas.h>
+#endif
 
 /* ========================================================================
  * Random Number Generator (xoshiro256**)
@@ -186,6 +194,27 @@ void flux_batched_matmul(float *C, const float *A, const float *B,
 void flux_linear(float *y, const float *x, const float *W, const float *b,
                  int seq_len, int in_dim, int out_dim) {
     /* y[seq, out] = x[seq, in] @ W[out, in]^T + b[out] */
+#if defined(USE_ACCELERATE) || defined(USE_OPENBLAS)
+    /* Use BLAS sgemm: C = alpha * A @ B^T + beta * C
+     * A[M, K] = x[seq_len, in_dim]
+     * B[N, K] = W[out_dim, in_dim]
+     * C[M, N] = y[seq_len, out_dim]
+     */
+    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+                seq_len, out_dim, in_dim,
+                1.0f, x, in_dim, W, in_dim,
+                0.0f, y, out_dim);
+
+    /* Add bias if present */
+    if (b != NULL) {
+        for (int s = 0; s < seq_len; s++) {
+            for (int o = 0; o < out_dim; o++) {
+                y[s * out_dim + o] += b[o];
+            }
+        }
+    }
+#else
+    /* Fallback: naive implementation */
     for (int s = 0; s < seq_len; s++) {
         for (int o = 0; o < out_dim; o++) {
             float sum = (b != NULL) ? b[o] : 0.0f;
@@ -195,6 +224,7 @@ void flux_linear(float *y, const float *x, const float *W, const float *b,
             y[s * out_dim + o] = sum;
         }
     }
+#endif
 }
 
 void flux_linear_nobias(float *y, const float *x, const float *W,
@@ -206,12 +236,80 @@ void flux_linear_nobias(float *y, const float *x, const float *W,
  * Convolution Operations
  * ======================================================================== */
 
+/* im2col: Extract patches from input image into columns for BLAS matmul */
+static void im2col(const float *in, float *col,
+                   int in_ch, int H, int W,
+                   int kH, int kW, int stride, int padding,
+                   int outH, int outW) {
+    int col_row = 0;
+    for (int ic = 0; ic < in_ch; ic++) {
+        for (int kh = 0; kh < kH; kh++) {
+            for (int kw = 0; kw < kW; kw++) {
+                for (int oh = 0; oh < outH; oh++) {
+                    for (int ow = 0; ow < outW; ow++) {
+                        int ih = oh * stride - padding + kh;
+                        int iw = ow * stride - padding + kw;
+                        int col_idx = col_row * (outH * outW) + oh * outW + ow;
+                        if (ih >= 0 && ih < H && iw >= 0 && iw < W) {
+                            col[col_idx] = in[ic * H * W + ih * W + iw];
+                        } else {
+                            col[col_idx] = 0.0f;
+                        }
+                    }
+                }
+                col_row++;
+            }
+        }
+    }
+}
+
 void flux_conv2d(float *out, const float *in, const float *weight, const float *bias,
                  int batch, int in_ch, int out_ch, int H, int W,
                  int kH, int kW, int stride, int padding) {
     int outH = (H + 2 * padding - kH) / stride + 1;
     int outW = (W + 2 * padding - kW) / stride + 1;
 
+#if defined(USE_ACCELERATE) || defined(USE_OPENBLAS)
+    /* im2col + BLAS optimization */
+    int col_size = in_ch * kH * kW * outH * outW;
+    float *col = malloc(col_size * sizeof(float));
+    if (!col) {
+        /* Fallback to naive if allocation fails */
+        goto naive_fallback;
+    }
+
+    for (int b = 0; b < batch; b++) {
+        const float *in_b = in + b * in_ch * H * W;
+        float *out_b = out + b * out_ch * outH * outW;
+
+        /* im2col: col[in_ch*kH*kW, outH*outW] */
+        im2col(in_b, col, in_ch, H, W, kH, kW, stride, padding, outH, outW);
+
+        /* BLAS: out[out_ch, outH*outW] = weight[out_ch, in_ch*kH*kW] @ col[in_ch*kH*kW, outH*outW] */
+        cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                    out_ch, outH * outW, in_ch * kH * kW,
+                    1.0f, weight, in_ch * kH * kW,
+                    col, outH * outW,
+                    0.0f, out_b, outH * outW);
+
+        /* Add bias */
+        if (bias != NULL) {
+            for (int oc = 0; oc < out_ch; oc++) {
+                float b_val = bias[oc];
+                float *out_ch_ptr = out_b + oc * outH * outW;
+                for (int i = 0; i < outH * outW; i++) {
+                    out_ch_ptr[i] += b_val;
+                }
+            }
+        }
+    }
+
+    free(col);
+    return;
+
+naive_fallback:
+#endif
+    /* Naive implementation (fallback) */
     for (int b = 0; b < batch; b++) {
         for (int oc = 0; oc < out_ch; oc++) {
             for (int oh = 0; oh < outH; oh++) {
