@@ -1498,7 +1498,12 @@ flux_transformer_t *flux_transformer_load_safetensors(safetensors_file_t *sf) {
     tf->num_single_layers = 20;
     tf->text_dim = 7680;
     tf->latent_channels = 128;
-    tf->max_seq_len = 4096;
+    /* Max sequence length must accommodate image + text tokens combined.
+     * At 1024x1024: img_seq = (1024/8)^2 = 16384, txt_seq = 512, total = 16896
+     * At 2048x2048: img_seq = (2048/8)^2 = 65536 (requires 17GB+ for attn scores!)
+     * We set 18000 to support up to ~1024x1024 with margin.
+     */
+    tf->max_seq_len = 18000;
     tf->rope_dim = 128;
     tf->rope_theta = 2000.0f;
 

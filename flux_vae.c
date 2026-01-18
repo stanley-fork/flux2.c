@@ -203,41 +203,42 @@ static void attnblock_forward(float *out, const float *x,
         float *vb = v + b * ch * spatial;
         float *ob = attn_out + b * ch * spatial;
 
-        /* Transpose Q, K, V from [C, HW] to [HW, C] */
-        /* Then compute attention: softmax(Q @ K^T / sqrt(d)) @ V */
-
-        /* Allocate temporary for attention scores */
+        /* Transpose Q, K, V from [C, HW] to [HW, C] for BLAS */
+        float *q_t = (float *)malloc(spatial * ch * sizeof(float));
+        float *k_t = (float *)malloc(spatial * ch * sizeof(float));
+        float *v_t = (float *)malloc(spatial * ch * sizeof(float));
+        float *o_t = (float *)malloc(spatial * ch * sizeof(float));
         float *scores = (float *)malloc(spatial * spatial * sizeof(float));
 
-        /* Q @ K^T */
-        memset(scores, 0, spatial * spatial * sizeof(float));
+        /* Transpose [C, HW] -> [HW, C] */
         for (int c = 0; c < ch; c++) {
-            const float *q_c = qb + c * spatial;
-            const float *k_c = kb + c * spatial;
             for (int i = 0; i < spatial; i++) {
-                float qv = q_c[i] * scale;
-                float *score_row = scores + i * spatial;
-                const float *k_ptr = k_c;
-                for (int j = 0; j < spatial; j++) {
-                    *score_row++ += qv * *k_ptr++;
-                }
+                q_t[i * ch + c] = qb[c * spatial + i] * scale;
+                k_t[i * ch + c] = kb[c * spatial + i];
+                v_t[i * ch + c] = vb[c * spatial + i];
             }
         }
+
+        /* Q @ K^T using BLAS: [HW, C] @ [C, HW] -> [HW, HW] */
+        flux_matmul_t(scores, q_t, k_t, spatial, ch, spatial);
 
         /* Softmax */
         flux_softmax(scores, spatial, spatial);
 
-        /* scores @ V -> output */
+        /* scores @ V using BLAS: [HW, HW] @ [HW, C] -> [HW, C] */
+        flux_matmul(o_t, scores, v_t, spatial, spatial, ch);
+
+        /* Transpose output back [HW, C] -> [C, HW] */
         for (int c = 0; c < ch; c++) {
             for (int i = 0; i < spatial; i++) {
-                float sum = 0.0f;
-                for (int j = 0; j < spatial; j++) {
-                    sum += scores[i * spatial + j] * vb[c * spatial + j];
-                }
-                ob[c * spatial + i] = sum;
+                ob[c * spatial + i] = o_t[i * ch + c];
             }
         }
 
+        free(q_t);
+        free(k_t);
+        free(v_t);
+        free(o_t);
         free(scores);
     }
 

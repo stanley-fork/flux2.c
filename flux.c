@@ -182,9 +182,9 @@ flux_ctx *flux_load_dir(const char *model_dir) {
         return NULL;
     }
 
-    /* Set defaults */
-    ctx->max_width = 2048;
-    ctx->max_height = 2048;
+    /* Set defaults - max 1024x1024 due to O(seq^2) attention memory */
+    ctx->max_width = 1024;
+    ctx->max_height = 1024;
     ctx->default_steps = 4;
     ctx->default_guidance = 1.0f;
     strncpy(ctx->model_name, "FLUX.2-klein-4B", sizeof(ctx->model_name) - 1);
