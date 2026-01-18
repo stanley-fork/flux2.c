@@ -87,7 +87,7 @@ typedef struct {
 } flux_params;
 
 /* Default parameters */
-#define FLUX_PARAMS_DEFAULT { 1024, 1024, 4, 1.0f, -1, 0.75f }
+#define FLUX_PARAMS_DEFAULT { 256, 256, 4, 1.0f, -1, 0.75f }
 
 /* ========================================================================
  * Core API

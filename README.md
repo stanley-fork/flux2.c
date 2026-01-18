@@ -358,8 +358,8 @@ void flux_release_text_encoder(flux_ctx *ctx);     /* Manually free ~8GB (option
 
 ```c
 typedef struct {
-    int width;              /* Output width in pixels (default: 1024) */
-    int height;             /* Output height in pixels (default: 1024) */
+    int width;              /* Output width in pixels (default: 256) */
+    int height;             /* Output height in pixels (default: 256) */
     int num_steps;          /* Denoising steps, use 4 for klein (default: 4) */
     float guidance_scale;   /* CFG scale, use 1.0 for klein (default: 1.0) */
     int64_t seed;           /* Random seed, -1 for random (default: -1) */
@@ -367,7 +367,7 @@ typedef struct {
 } flux_params;
 
 /* Initialize with sensible defaults */
-#define FLUX_PARAMS_DEFAULT { 1024, 1024, 4, 1.0f, -1, 0.75f }
+#define FLUX_PARAMS_DEFAULT { 256, 256, 4, 1.0f, -1, 0.75f }
 ```
 
 ## License
