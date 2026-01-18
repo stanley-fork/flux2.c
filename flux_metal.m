@@ -23,6 +23,25 @@ static id<MTLCommandQueue> g_queue = nil;
 static int g_initialized = 0;
 
 /* ========================================================================
+ * Batch Execution State
+ * When in batch mode, operations are encoded but not executed until
+ * flux_metal_end_batch() is called.
+ * ======================================================================== */
+
+#define MAX_BATCH_OUTPUTS 256
+
+typedef struct {
+    id<MTLBuffer> buffer;
+    float *cpu_ptr;
+    size_t size;
+} pending_output_t;
+
+static id<MTLCommandBuffer> g_batch_cmd = nil;
+static int g_in_batch = 0;
+static pending_output_t g_pending_outputs[MAX_BATCH_OUTPUTS];
+static int g_pending_count = 0;
+
+/* ========================================================================
  * Weight Buffer Cache
  * Cache GPU buffers for weight matrices to avoid repeated allocations.
  * Weights are identified by their CPU pointer address.
@@ -133,11 +152,56 @@ void flux_metal_cleanup(void) {
     if (!g_initialized) return;
 
     @autoreleasepool {
+        /* End any pending batch */
+        if (g_in_batch) {
+            flux_metal_end_batch();
+        }
         clear_weight_cache();
         g_queue = nil;
         g_device = nil;
         g_initialized = 0;
     }
+}
+
+/* ========================================================================
+ * Batch Execution Functions
+ * ======================================================================== */
+
+void flux_metal_begin_batch(void) {
+    if (!g_initialized || g_in_batch) return;
+
+    @autoreleasepool {
+        g_batch_cmd = [g_queue commandBuffer];
+        g_in_batch = 1;
+        g_pending_count = 0;
+    }
+}
+
+void flux_metal_end_batch(void) {
+    if (!g_initialized || !g_in_batch) return;
+
+    @autoreleasepool {
+        if (g_batch_cmd) {
+            [g_batch_cmd commit];
+            [g_batch_cmd waitUntilCompleted];
+
+            /* Copy all pending outputs back to CPU */
+            for (int i = 0; i < g_pending_count; i++) {
+                memcpy(g_pending_outputs[i].cpu_ptr,
+                       [g_pending_outputs[i].buffer contents],
+                       g_pending_outputs[i].size);
+                g_pending_outputs[i].buffer = nil;
+            }
+
+            g_batch_cmd = nil;
+        }
+        g_in_batch = 0;
+        g_pending_count = 0;
+    }
+}
+
+int flux_metal_in_batch(void) {
+    return g_in_batch;
 }
 
 /* ========================================================================
@@ -222,18 +286,33 @@ void flux_metal_sgemm(int transpose_a, int transpose_b,
                        alpha:alpha
                         beta:beta];
 
-        /* Encode and execute */
-        id<MTLCommandBuffer> cmdBuffer = [g_queue commandBuffer];
+        /* Use batch command buffer if in batch mode, otherwise create new one */
+        id<MTLCommandBuffer> cmdBuffer = g_in_batch ? g_batch_cmd : [g_queue commandBuffer];
+
         [matmul encodeToCommandBuffer:cmdBuffer
                            leftMatrix:matrixA
                           rightMatrix:matrixB
                          resultMatrix:matrixC];
 
-        [cmdBuffer commit];
-        [cmdBuffer waitUntilCompleted];
-
-        /* Copy result back to C */
-        memcpy(C, [bufferC contents], sizeC);
+        if (g_in_batch) {
+            /* In batch mode: defer result copy until end_batch */
+            if (g_pending_count < MAX_BATCH_OUTPUTS) {
+                g_pending_outputs[g_pending_count].buffer = bufferC;
+                g_pending_outputs[g_pending_count].cpu_ptr = C;
+                g_pending_outputs[g_pending_count].size = sizeC;
+                g_pending_count++;
+            } else {
+                /* Too many pending outputs - fall back to immediate sync */
+                [cmdBuffer commit];
+                [cmdBuffer waitUntilCompleted];
+                memcpy(C, [bufferC contents], sizeC);
+            }
+        } else {
+            /* Not in batch mode: execute immediately */
+            [cmdBuffer commit];
+            [cmdBuffer waitUntilCompleted];
+            memcpy(C, [bufferC contents], sizeC);
+        }
     }
 }
 

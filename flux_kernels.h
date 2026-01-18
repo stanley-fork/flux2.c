@@ -69,6 +69,30 @@ void flux_linear_nobias(float *y, const float *x, const float *W,
                         int seq_len, int in_dim, int out_dim);
 
 /* ========================================================================
+ * GPU Batch Operations
+ * These functions allow batching multiple GPU operations to reduce sync overhead.
+ * On non-GPU builds, these are no-ops.
+ * ======================================================================== */
+
+/*
+ * Begin a batch of GPU operations.
+ * Operations after this call are queued but not executed until flux_gpu_end_batch().
+ * NOTE: Only use for INDEPENDENT operations (outputs don't feed into subsequent inputs).
+ */
+void flux_gpu_begin_batch(void);
+
+/*
+ * End a batch of GPU operations.
+ * Executes all queued operations and waits for completion.
+ */
+void flux_gpu_end_batch(void);
+
+/*
+ * Check if GPU batch mode is currently active.
+ */
+int flux_gpu_in_batch(void);
+
+/* ========================================================================
  * Convolution Operations
  * ======================================================================== */
 

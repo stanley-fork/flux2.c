@@ -65,6 +65,24 @@ void flux_metal_sgemm_batch(int transpose_a, int transpose_b,
 void flux_metal_sync(void);
 
 /*
+ * Begin a batch of GPU operations.
+ * Operations after this call are encoded but not executed until flux_metal_end_batch().
+ * This eliminates per-operation sync overhead.
+ */
+void flux_metal_begin_batch(void);
+
+/*
+ * End a batch of GPU operations.
+ * Commits all encoded operations and waits for completion.
+ */
+void flux_metal_end_batch(void);
+
+/*
+ * Check if currently in batch mode.
+ */
+int flux_metal_in_batch(void);
+
+/*
  * Get GPU memory usage info (for debugging).
  */
 size_t flux_metal_memory_used(void);

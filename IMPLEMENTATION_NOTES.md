@@ -778,3 +778,186 @@ out.png
 
 This allows reproducing any run by using `-S <seed>` with the printed value.
 
+---
+
+## Performance Optimization Plan (2024-01-18)
+
+### Baseline Performance
+
+Benchmarks on Apple M3 Max (128GB RAM), 4-step generation:
+
+| Size | C (MPS) | C (BLAS) | PyTorch (MPS, bf16) | Slowdown |
+|------|---------|----------|---------------------|----------|
+| 512×512 | 49.6s | 51.9s | 5.4s | ~10x |
+| 256×256 | 32.4s | 29.7s | 3.0s | ~10x |
+| 64×64 | 25.0s | 23.5s | 2.2s | ~11x |
+
+**Root cause**: NOT float32 vs bfloat16. The ~10x gap comes from architectural issues.
+
+### Prioritized Optimization Steps
+
+#### Step 1: Eliminate Per-Op GPU Sync (CRITICAL - Expected 3-5x)
+
+**Problem**: Every `flux_metal_sgemm` call does:
+```objc
+[cmdBuffer commit];
+[cmdBuffer waitUntilCompleted];  // CPU waits for GPU!
+```
+With ~1300 matmuls/step × 4 steps = 5200+ sync points.
+
+**Solution**:
+- Batch operations into single command buffer per transformer block
+- Sync only at block boundaries or step end
+- Keep intermediate results on GPU
+
+**Files**: `flux_metal.m`, `flux_metal.h`
+
+#### Step 2: Eliminate Per-Op Memory Copies (CRITICAL - included in Step 1)
+
+**Problem**: Every matmul allocates buffers, copies in, copies out:
+```objc
+id<MTLBuffer> bufferA = [g_device newBufferWithBytes:A ...];  // Copy in
+// ... compute ...
+memcpy(C, [bufferC contents], sizeC);  // Copy out
+```
+
+**Solution**:
+- Persistent GPU buffers for activations (allocated once per inference)
+- Weights stay on GPU after first use (already cached)
+- Use `MTLResourceStorageModePrivate` where possible
+
+**Files**: `flux_metal.m`, `flux_transformer.c` (buffer management)
+
+#### Step 3: Move Attention to GPU (HIGH - Expected 1.5-2x)
+
+**Problem**: `mha_forward()` and `joint_attention()` use CPU BLAS:
+```c
+for (int h = 0; h < tf->num_heads; h++) {
+    cblas_sgemm(...);  // Q @ K^T on CPU
+    flux_softmax(...); // CPU
+    cblas_sgemm(...);  // scores @ V on CPU
+}
+```
+
+**Solution**:
+- Use batched Metal matmul for all heads at once
+- Or implement fused SDPA kernel
+- Move softmax to GPU
+
+**Files**: `flux_transformer.c`, `flux_metal.m`
+
+#### Step 4: bfloat16 Inference (MODERATE - Expected 1.3-1.5x)
+
+**Problem**: Weights loaded as bf16, converted to f32, computed in f32.
+
+**Solution**:
+- Keep weights in bf16 (skip conversion in `flux_safetensors.c`)
+- Use `MPSDataTypeFloat16` for matmul
+- Activations in f16, accumulate in f32 for stability
+
+**Note**: Generic C target stays f32 (no hardware f16 support).
+
+**Files**: `flux_safetensors.c`, `flux_metal.m`, `flux_kernels.c`
+
+#### Step 5: Vectorize CPU Operations (MODERATE - Expected 1.2-1.5x for BLAS)
+
+**Problem**: Scalar loops for softmax, RMSNorm, SiLU in `flux_kernels.c`.
+
+**Solution**: Use Accelerate/vDSP:
+- Softmax: `vDSP_vmax`, `vDSP_vsub`, `vDSP_vexp`, `vDSP_sve`
+- RMSNorm: `vDSP_svesq`
+- SiLU: vectorized sigmoid
+
+**Files**: `flux_kernels.c`
+
+#### Step 6: Remove Hot-Path Allocations (LOW - Expected 1.1-1.2x)
+
+**Problem**: malloc/free inside loops:
+- `swiglu_ffn()` allocates gate/up/down per call
+- AdaLN allocates temp buffers
+- Attention concat/transpose copies
+
+**Solution**: Preallocate all workspace in transformer struct.
+
+**Files**: `flux_transformer.c`
+
+### Expected Combined Improvement
+
+| Steps | Expected Speedup | Time (256×256) |
+|-------|------------------|----------------|
+| Baseline | 1x | 30s |
+| Steps 1-2 | 3-5x | 6-10s |
+| + Step 3 | 5-8x | 4-6s |
+| + Step 4 | 7-10x | 3-4s |
+| + Steps 5-6 | 8-12x | 2.5-4s |
+
+**Target**: Match or approach PyTorch's 3.0s for 256×256.
+
+### Validation After Each Step
+
+After each optimization:
+```bash
+# Test generic C (must still work)
+make clean && make generic
+./flux -d flux-klein-model -p "test" -o /tmp/test.png -W 64 -H 64
+
+# Test MPS
+make clean && make mps
+./flux -d flux-klein-model -p "test" -o /tmp/test.png -W 64 -H 64
+
+# Compare with reference
+python3 -c "
+import numpy as np
+from PIL import Image
+ref = np.array(Image.open('test_vectors/reference_1step_64x64_seed42.png'))
+test = np.array(Image.open('/tmp/test.png'))
+diff = np.abs(ref.astype(float) - test.astype(float))
+print(f'Max diff: {diff.max()}, Mean: {diff.mean():.2f}')
+"
+```
+
+### Technical Notes
+
+**Model weights are already bfloat16** on disk (safetensors). Current code converts to f32 on load.
+
+**Attention is O(n²)** in sequence length:
+- 64×64: seq=528 (16 img + 512 txt)
+- 256×256: seq=768 (256 img + 512 txt)
+- 512×512: seq=1536 (1024 img + 512 txt)
+
+**M3 Max specs**:
+- ~28 TFLOPs bf16, ~14 TFLOPs f32
+- ~400 GB/s memory bandwidth
+- PyTorch achieves ~10.5 TFLOPs/s (~37% efficiency)
+
+---
+
+## Work Log
+
+### 2024-01-19: Batch Command Buffer Infrastructure
+
+**Added:**
+- `flux_metal_begin_batch()` / `flux_metal_end_batch()` / `flux_metal_in_batch()` in `flux_metal.m`
+- Wrapper functions `flux_gpu_begin_batch()` etc. in `flux_kernels.c`
+- Infrastructure allows batching multiple GPU operations with single sync
+
+**Key Finding:**
+The batch infrastructure alone won't provide speedup because transformer operations have **immediate data dependencies**:
+```c
+flux_linear_nobias(img_q, img_norm, ...);  // Output: img_q
+apply_qk_norm(img_q, ...);                  // Uses img_q immediately!
+```
+
+Each operation's output is used as input to the next operation. Batching only helps for truly independent operations.
+
+**What's needed for real speedup:**
+1. **Persistent GPU buffers**: Keep activations on GPU between operations
+2. **GPU tensor abstraction**: Pass buffer handles instead of CPU pointers
+3. **Restructured compute graph**: Identify and group independent operations
+
+**Tests:** MPS and BLAS pass reference comparison (max diff: 1.0, mean: 0.0001)
+
+**Next steps:**
+- Consider moving attention computation to GPU (batched matmul for all heads)
+- Or focus on bf16 inference which is simpler and still provides speedup
+

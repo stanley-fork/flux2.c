@@ -326,6 +326,30 @@ void flux_linear_nobias(float *y, const float *x, const float *W,
 }
 
 /* ========================================================================
+ * GPU Batch Operations
+ * ======================================================================== */
+
+void flux_gpu_begin_batch(void) {
+#ifdef USE_METAL
+    flux_metal_begin_batch();
+#endif
+}
+
+void flux_gpu_end_batch(void) {
+#ifdef USE_METAL
+    flux_metal_end_batch();
+#endif
+}
+
+int flux_gpu_in_batch(void) {
+#ifdef USE_METAL
+    return flux_metal_in_batch();
+#else
+    return 0;
+#endif
+}
+
+/* ========================================================================
  * Convolution Operations
  * ======================================================================== */
 
