@@ -234,6 +234,9 @@ int flux_metal_init(void) {
         g_initialized = 1;
         fprintf(stderr, "Metal: GPU acceleration enabled (%s)\n",
                 [[g_device name] UTF8String]);
+
+        /* Load compute shaders (high thresholds keep them dormant for small ops) */
+        flux_metal_init_shaders();
     }
 
     return 1;
@@ -1124,5 +1127,523 @@ flux_gpu_tensor_t flux_gpu_linear(flux_gpu_tensor_t x,
         }
 
         return out;
+    }
+}
+
+/* ========================================================================
+ * Compute Shader Support
+ * Custom Metal compute shaders for element-wise operations.
+ * ======================================================================== */
+
+/* Compute pipeline states */
+static id<MTLLibrary> g_shader_library = nil;
+static id<MTLComputePipelineState> g_rms_norm_pipeline = nil;
+static id<MTLComputePipelineState> g_qk_rms_norm_pipeline = nil;
+static id<MTLComputePipelineState> g_adaln_norm_pipeline = nil;
+static id<MTLComputePipelineState> g_silu_pipeline = nil;
+static id<MTLComputePipelineState> g_silu_mul_pipeline = nil;
+static id<MTLComputePipelineState> g_softmax_pipeline = nil;
+static id<MTLComputePipelineState> g_rope_2d_pipeline = nil;
+static int g_shaders_initialized = 0;
+
+int flux_metal_shaders_available(void) {
+    return g_shaders_initialized;
+}
+
+int flux_metal_init_shaders(void) {
+    if (g_shaders_initialized) return 1;
+    if (!g_initialized) return 0;
+
+    @autoreleasepool {
+        NSError *error = nil;
+
+        /* Try to find the shader file in various locations */
+        NSString *shaderPath = nil;
+        NSArray *searchPaths = @[
+            @"flux_shaders.metal",
+            @"./flux_shaders.metal",
+            [[NSBundle mainBundle] pathForResource:@"flux_shaders" ofType:@"metal"],
+        ];
+
+        for (NSString *path in searchPaths) {
+            if (path && [[NSFileManager defaultManager] fileExistsAtPath:path]) {
+                shaderPath = path;
+                break;
+            }
+        }
+
+        if (!shaderPath) {
+            /* Try executable directory */
+            NSString *execPath = [[NSBundle mainBundle] executablePath];
+            if (execPath) {
+                NSString *execDir = [execPath stringByDeletingLastPathComponent];
+                NSString *path = [execDir stringByAppendingPathComponent:@"flux_shaders.metal"];
+                if ([[NSFileManager defaultManager] fileExistsAtPath:path]) {
+                    shaderPath = path;
+                }
+            }
+        }
+
+        if (!shaderPath) {
+            fprintf(stderr, "Metal shaders: flux_shaders.metal not found\n");
+            return 0;
+        }
+
+        /* Load shader source */
+        NSString *shaderSource = [NSString stringWithContentsOfFile:shaderPath
+                                                           encoding:NSUTF8StringEncoding
+                                                              error:&error];
+        if (!shaderSource) {
+            fprintf(stderr, "Metal shaders: failed to read %s: %s\n",
+                    [shaderPath UTF8String], [[error localizedDescription] UTF8String]);
+            return 0;
+        }
+
+        /* Compile shader library */
+        MTLCompileOptions *options = [[MTLCompileOptions alloc] init];
+        options.fastMathEnabled = YES;
+
+        g_shader_library = [g_device newLibraryWithSource:shaderSource
+                                                  options:options
+                                                    error:&error];
+        if (!g_shader_library) {
+            fprintf(stderr, "Metal shaders: compilation failed: %s\n",
+                    [[error localizedDescription] UTF8String]);
+            return 0;
+        }
+
+        /* Create compute pipeline states for each kernel */
+        id<MTLFunction> func;
+
+        func = [g_shader_library newFunctionWithName:@"rms_norm"];
+        if (func) {
+            g_rms_norm_pipeline = [g_device newComputePipelineStateWithFunction:func error:&error];
+            if (!g_rms_norm_pipeline) {
+                fprintf(stderr, "Metal shaders: rms_norm pipeline failed: %s\n",
+                        [[error localizedDescription] UTF8String]);
+            }
+        }
+
+        func = [g_shader_library newFunctionWithName:@"qk_rms_norm"];
+        if (func) {
+            g_qk_rms_norm_pipeline = [g_device newComputePipelineStateWithFunction:func error:&error];
+            if (!g_qk_rms_norm_pipeline) {
+                fprintf(stderr, "Metal shaders: qk_rms_norm pipeline failed: %s\n",
+                        [[error localizedDescription] UTF8String]);
+            }
+        }
+
+        func = [g_shader_library newFunctionWithName:@"adaln_norm"];
+        if (func) {
+            g_adaln_norm_pipeline = [g_device newComputePipelineStateWithFunction:func error:&error];
+            if (!g_adaln_norm_pipeline) {
+                fprintf(stderr, "Metal shaders: adaln_norm pipeline failed: %s\n",
+                        [[error localizedDescription] UTF8String]);
+            }
+        }
+
+        func = [g_shader_library newFunctionWithName:@"silu"];
+        if (func) {
+            g_silu_pipeline = [g_device newComputePipelineStateWithFunction:func error:&error];
+            if (!g_silu_pipeline) {
+                fprintf(stderr, "Metal shaders: silu pipeline failed: %s\n",
+                        [[error localizedDescription] UTF8String]);
+            }
+        }
+
+        func = [g_shader_library newFunctionWithName:@"silu_mul"];
+        if (func) {
+            g_silu_mul_pipeline = [g_device newComputePipelineStateWithFunction:func error:&error];
+            if (!g_silu_mul_pipeline) {
+                fprintf(stderr, "Metal shaders: silu_mul pipeline failed: %s\n",
+                        [[error localizedDescription] UTF8String]);
+            }
+        }
+
+        func = [g_shader_library newFunctionWithName:@"softmax"];
+        if (func) {
+            g_softmax_pipeline = [g_device newComputePipelineStateWithFunction:func error:&error];
+            if (!g_softmax_pipeline) {
+                fprintf(stderr, "Metal shaders: softmax pipeline failed: %s\n",
+                        [[error localizedDescription] UTF8String]);
+            }
+        }
+
+        func = [g_shader_library newFunctionWithName:@"apply_rope_2d"];
+        if (func) {
+            g_rope_2d_pipeline = [g_device newComputePipelineStateWithFunction:func error:&error];
+            if (!g_rope_2d_pipeline) {
+                fprintf(stderr, "Metal shaders: apply_rope_2d pipeline failed: %s\n",
+                        [[error localizedDescription] UTF8String]);
+            }
+        }
+
+        g_shaders_initialized = 1;
+        fprintf(stderr, "Metal shaders: compute kernels loaded\n");
+        return 1;
+    }
+}
+
+/* Helper to encode a compute shader with common setup */
+static id<MTLCommandBuffer> encode_compute_shader(void) {
+    return g_in_batch ? g_batch_cmd : [g_queue commandBuffer];
+}
+
+void flux_metal_rms_norm(float *out, const float *x, const float *weight,
+                         int seq_len, int hidden, float eps) {
+    if (!g_shaders_initialized || !g_rms_norm_pipeline) return;
+
+    @autoreleasepool {
+        size_t data_size = (size_t)seq_len * hidden * sizeof(float);
+        size_t weight_size = (size_t)hidden * sizeof(float);
+
+        /* Create buffers */
+        id<MTLBuffer> bufX = pool_get_buffer(data_size);
+        id<MTLBuffer> bufWeight = get_cached_weight_buffer(weight, weight_size);
+        id<MTLBuffer> bufOut = pool_get_buffer(data_size);
+
+        if (!bufX || !bufWeight || !bufOut) {
+            if (bufX) pool_release_buffer(bufX);
+            if (bufOut) pool_release_buffer(bufOut);
+            return;
+        }
+
+        memcpy([bufX contents], x, data_size);
+
+        id<MTLCommandBuffer> cmdBuffer = encode_compute_shader();
+        id<MTLComputeCommandEncoder> encoder = [cmdBuffer computeCommandEncoder];
+
+        [encoder setComputePipelineState:g_rms_norm_pipeline];
+        [encoder setBuffer:bufX offset:0 atIndex:0];
+        [encoder setBuffer:bufWeight offset:0 atIndex:1];
+        [encoder setBuffer:bufOut offset:0 atIndex:2];
+        [encoder setBytes:&hidden length:sizeof(int) atIndex:3];
+        [encoder setBytes:&eps length:sizeof(float) atIndex:4];
+
+        /* One threadgroup per row, 256 threads per group */
+        NSUInteger threadsPerGroup = MIN(256, (NSUInteger)hidden);
+        [encoder dispatchThreadgroups:MTLSizeMake(seq_len, 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(threadsPerGroup, 1, 1)];
+
+        [encoder endEncoding];
+
+        if (!g_in_batch) {
+            [cmdBuffer commit];
+            [cmdBuffer waitUntilCompleted];
+            memcpy(out, [bufOut contents], data_size);
+            pool_release_buffer(bufX);
+            pool_release_buffer(bufOut);
+        } else {
+            if (g_pending_count < MAX_BATCH_OUTPUTS) {
+                g_pending_outputs[g_pending_count].buffer = bufOut;
+                g_pending_outputs[g_pending_count].cpu_ptr = out;
+                g_pending_outputs[g_pending_count].size = data_size;
+                g_pending_count++;
+            }
+            pool_release_buffer(bufX);
+        }
+    }
+}
+
+void flux_metal_qk_rms_norm(float *q, float *k,
+                            const float *q_weight, const float *k_weight,
+                            int seq, int heads, int head_dim, float eps) {
+    if (!g_shaders_initialized || !g_qk_rms_norm_pipeline) return;
+
+    @autoreleasepool {
+        size_t data_size = (size_t)seq * heads * head_dim * sizeof(float);
+        size_t weight_size = (size_t)head_dim * sizeof(float);
+
+        /* Create buffers - Q and K are modified in-place */
+        id<MTLBuffer> bufQ = pool_get_buffer(data_size);
+        id<MTLBuffer> bufK = pool_get_buffer(data_size);
+        id<MTLBuffer> bufQWeight = get_cached_weight_buffer(q_weight, weight_size);
+        id<MTLBuffer> bufKWeight = get_cached_weight_buffer(k_weight, weight_size);
+
+        if (!bufQ || !bufK || !bufQWeight || !bufKWeight) {
+            if (bufQ) pool_release_buffer(bufQ);
+            if (bufK) pool_release_buffer(bufK);
+            return;
+        }
+
+        memcpy([bufQ contents], q, data_size);
+        memcpy([bufK contents], k, data_size);
+
+        id<MTLCommandBuffer> cmdBuffer = encode_compute_shader();
+        id<MTLComputeCommandEncoder> encoder = [cmdBuffer computeCommandEncoder];
+
+        [encoder setComputePipelineState:g_qk_rms_norm_pipeline];
+        [encoder setBuffer:bufQ offset:0 atIndex:0];
+        [encoder setBuffer:bufK offset:0 atIndex:1];
+        [encoder setBuffer:bufQWeight offset:0 atIndex:2];
+        [encoder setBuffer:bufKWeight offset:0 atIndex:3];
+        [encoder setBytes:&heads length:sizeof(int) atIndex:4];
+        [encoder setBytes:&head_dim length:sizeof(int) atIndex:5];
+        [encoder setBytes:&eps length:sizeof(float) atIndex:6];
+
+        /* One thread per (seq_idx, head_idx) pair */
+        [encoder dispatchThreads:MTLSizeMake(seq, heads, 1)
+           threadsPerThreadgroup:MTLSizeMake(1, MIN(heads, 64), 1)];
+
+        [encoder endEncoding];
+
+        [cmdBuffer commit];
+        [cmdBuffer waitUntilCompleted];
+
+        memcpy(q, [bufQ contents], data_size);
+        memcpy(k, [bufK contents], data_size);
+
+        pool_release_buffer(bufQ);
+        pool_release_buffer(bufK);
+    }
+}
+
+void flux_metal_adaln_norm(float *out, const float *x,
+                           const float *shift, const float *scale,
+                           int seq_len, int hidden, float eps) {
+    if (!g_shaders_initialized || !g_adaln_norm_pipeline) return;
+
+    @autoreleasepool {
+        size_t data_size = (size_t)seq_len * hidden * sizeof(float);
+        size_t param_size = (size_t)hidden * sizeof(float);
+
+        id<MTLBuffer> bufX = pool_get_buffer(data_size);
+        id<MTLBuffer> bufShift = pool_get_buffer(param_size);
+        id<MTLBuffer> bufScale = pool_get_buffer(param_size);
+        id<MTLBuffer> bufOut = pool_get_buffer(data_size);
+
+        if (!bufX || !bufShift || !bufScale || !bufOut) {
+            if (bufX) pool_release_buffer(bufX);
+            if (bufShift) pool_release_buffer(bufShift);
+            if (bufScale) pool_release_buffer(bufScale);
+            if (bufOut) pool_release_buffer(bufOut);
+            return;
+        }
+
+        memcpy([bufX contents], x, data_size);
+        memcpy([bufShift contents], shift, param_size);
+        memcpy([bufScale contents], scale, param_size);
+
+        id<MTLCommandBuffer> cmdBuffer = encode_compute_shader();
+        id<MTLComputeCommandEncoder> encoder = [cmdBuffer computeCommandEncoder];
+
+        [encoder setComputePipelineState:g_adaln_norm_pipeline];
+        [encoder setBuffer:bufX offset:0 atIndex:0];
+        [encoder setBuffer:bufShift offset:0 atIndex:1];
+        [encoder setBuffer:bufScale offset:0 atIndex:2];
+        [encoder setBuffer:bufOut offset:0 atIndex:3];
+        [encoder setBytes:&hidden length:sizeof(int) atIndex:4];
+        [encoder setBytes:&eps length:sizeof(float) atIndex:5];
+
+        NSUInteger threadsPerGroup = MIN(256, (NSUInteger)hidden);
+        [encoder dispatchThreadgroups:MTLSizeMake(seq_len, 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(threadsPerGroup, 1, 1)];
+
+        [encoder endEncoding];
+
+        if (!g_in_batch) {
+            [cmdBuffer commit];
+            [cmdBuffer waitUntilCompleted];
+            memcpy(out, [bufOut contents], data_size);
+            pool_release_buffer(bufX);
+            pool_release_buffer(bufShift);
+            pool_release_buffer(bufScale);
+            pool_release_buffer(bufOut);
+        } else {
+            if (g_pending_count < MAX_BATCH_OUTPUTS) {
+                g_pending_outputs[g_pending_count].buffer = bufOut;
+                g_pending_outputs[g_pending_count].cpu_ptr = out;
+                g_pending_outputs[g_pending_count].size = data_size;
+                g_pending_count++;
+            }
+            pool_release_buffer(bufX);
+            pool_release_buffer(bufShift);
+            pool_release_buffer(bufScale);
+        }
+    }
+}
+
+void flux_metal_silu(float *x, int n) {
+    if (!g_shaders_initialized || !g_silu_pipeline || n <= 0) return;
+
+    @autoreleasepool {
+        size_t data_size = (size_t)n * sizeof(float);
+
+        id<MTLBuffer> bufX = pool_get_buffer(data_size);
+        if (!bufX) return;
+
+        memcpy([bufX contents], x, data_size);
+
+        id<MTLCommandBuffer> cmdBuffer = encode_compute_shader();
+        id<MTLComputeCommandEncoder> encoder = [cmdBuffer computeCommandEncoder];
+
+        [encoder setComputePipelineState:g_silu_pipeline];
+        [encoder setBuffer:bufX offset:0 atIndex:0];
+        [encoder setBytes:&n length:sizeof(int) atIndex:1];
+
+        NSUInteger threadsPerGroup = [g_silu_pipeline maxTotalThreadsPerThreadgroup];
+        NSUInteger threadGroups = (n + threadsPerGroup - 1) / threadsPerGroup;
+        [encoder dispatchThreadgroups:MTLSizeMake(threadGroups, 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(threadsPerGroup, 1, 1)];
+
+        [encoder endEncoding];
+
+        if (!g_in_batch) {
+            [cmdBuffer commit];
+            [cmdBuffer waitUntilCompleted];
+            memcpy(x, [bufX contents], data_size);
+            pool_release_buffer(bufX);
+        } else {
+            if (g_pending_count < MAX_BATCH_OUTPUTS) {
+                g_pending_outputs[g_pending_count].buffer = bufX;
+                g_pending_outputs[g_pending_count].cpu_ptr = x;
+                g_pending_outputs[g_pending_count].size = data_size;
+                g_pending_count++;
+            }
+        }
+    }
+}
+
+void flux_metal_silu_mul(float *gate, const float *up, int n) {
+    if (!g_shaders_initialized || !g_silu_mul_pipeline || n <= 0) return;
+
+    @autoreleasepool {
+        size_t data_size = (size_t)n * sizeof(float);
+
+        id<MTLBuffer> bufGate = pool_get_buffer(data_size);
+        id<MTLBuffer> bufUp = pool_get_buffer(data_size);
+        if (!bufGate || !bufUp) {
+            if (bufGate) pool_release_buffer(bufGate);
+            if (bufUp) pool_release_buffer(bufUp);
+            return;
+        }
+
+        memcpy([bufGate contents], gate, data_size);
+        memcpy([bufUp contents], up, data_size);
+
+        id<MTLCommandBuffer> cmdBuffer = encode_compute_shader();
+        id<MTLComputeCommandEncoder> encoder = [cmdBuffer computeCommandEncoder];
+
+        [encoder setComputePipelineState:g_silu_mul_pipeline];
+        [encoder setBuffer:bufGate offset:0 atIndex:0];
+        [encoder setBuffer:bufUp offset:0 atIndex:1];
+        [encoder setBytes:&n length:sizeof(int) atIndex:2];
+
+        NSUInteger threadsPerGroup = [g_silu_mul_pipeline maxTotalThreadsPerThreadgroup];
+        NSUInteger threadGroups = (n + threadsPerGroup - 1) / threadsPerGroup;
+        [encoder dispatchThreadgroups:MTLSizeMake(threadGroups, 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(threadsPerGroup, 1, 1)];
+
+        [encoder endEncoding];
+
+        if (!g_in_batch) {
+            [cmdBuffer commit];
+            [cmdBuffer waitUntilCompleted];
+            memcpy(gate, [bufGate contents], data_size);
+            pool_release_buffer(bufGate);
+            pool_release_buffer(bufUp);
+        } else {
+            if (g_pending_count < MAX_BATCH_OUTPUTS) {
+                g_pending_outputs[g_pending_count].buffer = bufGate;
+                g_pending_outputs[g_pending_count].cpu_ptr = gate;
+                g_pending_outputs[g_pending_count].size = data_size;
+                g_pending_count++;
+            }
+            pool_release_buffer(bufUp);
+        }
+    }
+}
+
+void flux_metal_softmax(float *x, int rows, int cols) {
+    if (!g_shaders_initialized || !g_softmax_pipeline || rows <= 0 || cols <= 0) return;
+
+    @autoreleasepool {
+        size_t data_size = (size_t)rows * cols * sizeof(float);
+
+        id<MTLBuffer> bufX = pool_get_buffer(data_size);
+        if (!bufX) return;
+
+        memcpy([bufX contents], x, data_size);
+
+        id<MTLCommandBuffer> cmdBuffer = encode_compute_shader();
+        id<MTLComputeCommandEncoder> encoder = [cmdBuffer computeCommandEncoder];
+
+        [encoder setComputePipelineState:g_softmax_pipeline];
+        [encoder setBuffer:bufX offset:0 atIndex:0];
+        [encoder setBytes:&rows length:sizeof(int) atIndex:1];
+        [encoder setBytes:&cols length:sizeof(int) atIndex:2];
+
+        /* One threadgroup per row */
+        NSUInteger threadsPerGroup = MIN(256, (NSUInteger)cols);
+        [encoder dispatchThreadgroups:MTLSizeMake(rows, 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(threadsPerGroup, 1, 1)];
+
+        [encoder endEncoding];
+
+        if (!g_in_batch) {
+            [cmdBuffer commit];
+            [cmdBuffer waitUntilCompleted];
+            memcpy(x, [bufX contents], data_size);
+            pool_release_buffer(bufX);
+        } else {
+            if (g_pending_count < MAX_BATCH_OUTPUTS) {
+                g_pending_outputs[g_pending_count].buffer = bufX;
+                g_pending_outputs[g_pending_count].cpu_ptr = x;
+                g_pending_outputs[g_pending_count].size = data_size;
+                g_pending_count++;
+            }
+        }
+    }
+}
+
+void flux_metal_rope_2d(float *x, const float *cos_freq, const float *sin_freq,
+                        int seq, int heads, int head_dim, int axis_dim) {
+    if (!g_shaders_initialized || !g_rope_2d_pipeline) return;
+
+    @autoreleasepool {
+        size_t data_size = (size_t)seq * heads * head_dim * sizeof(float);
+        size_t freq_size = (size_t)seq * head_dim * sizeof(float);
+
+        id<MTLBuffer> bufX = pool_get_buffer(data_size);
+        id<MTLBuffer> bufCos = pool_get_buffer(freq_size);
+        id<MTLBuffer> bufSin = pool_get_buffer(freq_size);
+
+        if (!bufX || !bufCos || !bufSin) {
+            if (bufX) pool_release_buffer(bufX);
+            if (bufCos) pool_release_buffer(bufCos);
+            if (bufSin) pool_release_buffer(bufSin);
+            return;
+        }
+
+        memcpy([bufX contents], x, data_size);
+        memcpy([bufCos contents], cos_freq, freq_size);
+        memcpy([bufSin contents], sin_freq, freq_size);
+
+        id<MTLCommandBuffer> cmdBuffer = encode_compute_shader();
+        id<MTLComputeCommandEncoder> encoder = [cmdBuffer computeCommandEncoder];
+
+        [encoder setComputePipelineState:g_rope_2d_pipeline];
+        [encoder setBuffer:bufX offset:0 atIndex:0];
+        [encoder setBuffer:bufCos offset:0 atIndex:1];
+        [encoder setBuffer:bufSin offset:0 atIndex:2];
+        [encoder setBytes:&seq length:sizeof(int) atIndex:3];
+        [encoder setBytes:&heads length:sizeof(int) atIndex:4];
+        [encoder setBytes:&head_dim length:sizeof(int) atIndex:5];
+        [encoder setBytes:&axis_dim length:sizeof(int) atIndex:6];
+
+        /* One thread per (seq, head) pair */
+        [encoder dispatchThreads:MTLSizeMake(seq, heads, 1)
+           threadsPerThreadgroup:MTLSizeMake(1, MIN(heads, 64), 1)];
+
+        [encoder endEncoding];
+
+        [cmdBuffer commit];
+        [cmdBuffer waitUntilCompleted];
+
+        memcpy(x, [bufX contents], data_size);
+
+        pool_release_buffer(bufX);
+        pool_release_buffer(bufCos);
+        pool_release_buffer(bufSin);
     }
 }

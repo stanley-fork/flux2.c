@@ -612,6 +612,16 @@ void flux_layer_norm(float *out, const float *x, const float *gamma, const float
 
 void flux_rms_norm(float *out, const float *x, const float *weight,
                    int seq_len, int hidden, float eps) {
+#ifdef USE_METAL
+    /* Use GPU for RMSNorm only for very large tensors
+     * The CPU-GPU sync overhead usually outweighs benefits for smaller ops */
+    size_t elements = (size_t)seq_len * hidden;
+    if (flux_metal_shaders_available() && elements >= 1024 * 1024) {
+        flux_metal_rms_norm(out, x, weight, seq_len, hidden, eps);
+        return;
+    }
+#endif
+
     for (int s = 0; s < seq_len; s++) {
         const float *x_row = x + s * hidden;
         float *out_row = out + s * hidden;
@@ -712,6 +722,14 @@ void flux_gelu(float *x, int n) {
 }
 
 void flux_silu(float *x, int n) {
+#ifdef USE_METAL
+    /* Use GPU for very large arrays (overhead not worth it for small ones) */
+    if (flux_metal_shaders_available() && n >= 4 * 1024 * 1024) {
+        flux_metal_silu(x, n);
+        return;
+    }
+#endif
+
     for (int i = 0; i < n; i++) {
         float val = x[i];
         x[i] = val / (1.0f + expf(-val));
@@ -727,6 +745,15 @@ void flux_swiglu(float *out, const float *x, const float *gate, int n) {
 }
 
 void flux_softmax(float *x, int rows, int cols) {
+#ifdef USE_METAL
+    /* Use GPU only for very large softmax operations
+     * Sync overhead usually dominates for smaller ops */
+    if (flux_metal_shaders_available() && (size_t)rows * cols >= 4 * 1024 * 1024) {
+        flux_metal_softmax(x, rows, cols);
+        return;
+    }
+#endif
+
     for (int r = 0; r < rows; r++) {
         float *row = x + r * cols;
 

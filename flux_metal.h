@@ -201,6 +201,75 @@ void flux_metal_attention(float *out,
                           int heads, int seq_q, int seq_k, int head_dim,
                           float scale);
 
+/* ========================================================================
+ * GPU Compute Shaders - Element-wise operations on GPU
+ * ======================================================================== */
+
+/*
+ * Initialize compute shaders from .metal file.
+ * Called automatically by flux_metal_init() if shader file exists.
+ * Returns 1 on success, 0 on failure.
+ */
+int flux_metal_init_shaders(void);
+
+/*
+ * GPU-accelerated RMSNorm.
+ * out[i] = x[i] * rsqrt(mean(x^2) + eps) * weight[i]
+ * x: [seq_len, hidden], weight: [hidden], out: [seq_len, hidden]
+ */
+void flux_metal_rms_norm(float *out, const float *x, const float *weight,
+                         int seq_len, int hidden, float eps);
+
+/*
+ * GPU-accelerated QK RMSNorm (in-place).
+ * Normalizes Q and K separately for each head.
+ * q, k: [seq, heads*head_dim] (modified in-place)
+ * q_weight, k_weight: [head_dim]
+ */
+void flux_metal_qk_rms_norm(float *q, float *k,
+                            const float *q_weight, const float *k_weight,
+                            int seq, int heads, int head_dim, float eps);
+
+/*
+ * GPU-accelerated LayerNorm + AdaLN modulation.
+ * out = (1 + scale) * layernorm(x) + shift
+ * x: [seq_len, hidden], shift/scale: [hidden]
+ */
+void flux_metal_adaln_norm(float *out, const float *x,
+                           const float *shift, const float *scale,
+                           int seq_len, int hidden, float eps);
+
+/*
+ * GPU-accelerated SiLU activation (in-place).
+ * x = x * sigmoid(x)
+ */
+void flux_metal_silu(float *x, int n);
+
+/*
+ * GPU-accelerated SiLU with multiply (SwiGLU style, in-place).
+ * gate = silu(gate) * up
+ */
+void flux_metal_silu_mul(float *gate, const float *up, int n);
+
+/*
+ * GPU-accelerated softmax (row-wise, in-place).
+ * x: [rows, cols], softmax applied to each row
+ */
+void flux_metal_softmax(float *x, int rows, int cols);
+
+/*
+ * GPU-accelerated 2D RoPE (in-place).
+ * x: [seq, heads*head_dim]
+ * cos_freq, sin_freq: [seq, head_dim]
+ */
+void flux_metal_rope_2d(float *x, const float *cos_freq, const float *sin_freq,
+                        int seq, int heads, int head_dim, int axis_dim);
+
+/*
+ * Check if compute shaders are available.
+ */
+int flux_metal_shaders_available(void);
+
 #ifdef __cplusplus
 }
 #endif
