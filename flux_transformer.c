@@ -2803,7 +2803,9 @@ float *flux_transformer_forward(flux_transformer_t *tf,
     }
 
 #ifdef USE_METAL
-    if (flux_metal_available() && flux_bf16_pipeline_available() && !tf->use_mmap && tf->use_bf16) {
+    /* With direct mmap pointers, the bf16 pipeline now works correctly in mmap mode.
+     * Cache entries are stable (pointers point into mmap region) so no collision. */
+    if (flux_metal_available() && flux_bf16_pipeline_available() && tf->use_bf16) {
         static int bf16_path_logged = 0;
         if (!bf16_path_logged) {
             bf16_path_logged = 1;
