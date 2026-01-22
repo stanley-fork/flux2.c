@@ -85,7 +85,6 @@ typedef struct {
     int width;              /* Output width (default: 256) */
     int height;             /* Output height (default: 256) */
     int num_steps;          /* Inference steps (default: 4 for klein) */
-    float guidance_scale;   /* CFG scale (default: 1.0 for klein) */
     int64_t seed;           /* Random seed (-1 for random) */
     float strength;         /* For img2img: 0.0-1.0 (default: 0.75) */
 } flux_params;
@@ -93,7 +92,7 @@ typedef struct {
 /* Default parameters */
 #define FLUX_DEFAULT_WIDTH  256
 #define FLUX_DEFAULT_HEIGHT 256
-#define FLUX_PARAMS_DEFAULT { FLUX_DEFAULT_WIDTH, FLUX_DEFAULT_HEIGHT, 4, 1.0f, -1, 0.75f }
+#define FLUX_PARAMS_DEFAULT { FLUX_DEFAULT_WIDTH, FLUX_DEFAULT_HEIGHT, 4, -1, 0.75f }
 
 /* ========================================================================
  * Core API

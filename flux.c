@@ -54,18 +54,14 @@ extern float *flux_transformer_forward(flux_transformer_t *tf,
 extern float *flux_sample_euler(void *transformer, void *text_encoder,
                                 float *z, int batch, int channels, int h, int w,
                                 const float *text_emb, int text_seq,
-                                const float *null_emb,
                                 const float *schedule, int num_steps,
-                                float guidance_scale,
                                 void (*progress_callback)(int step, int total));
 extern float *flux_sample_euler_with_refs(void *transformer, void *text_encoder,
                                           float *z, int batch, int channels, int h, int w,
                                           const float *ref_latent, int ref_h, int ref_w,
                                           int t_offset,
                                           const float *text_emb, int text_seq,
-                                          const float *null_emb,
                                           const float *schedule, int num_steps,
-                                          float guidance_scale,
                                           void (*progress_callback)(int step, int total));
 extern float *flux_linear_schedule(int num_steps);
 extern float *flux_official_schedule(int num_steps, int image_seq_len);
@@ -92,7 +88,6 @@ struct flux_ctx {
     int max_width;
     int max_height;
     int default_steps;
-    float default_guidance;
 
     /* Model info */
     char model_name[64];
@@ -142,7 +137,6 @@ flux_ctx *flux_load_dir(const char *model_dir) {
     ctx->max_width = FLUX_VAE_MAX_DIM;
     ctx->max_height = FLUX_VAE_MAX_DIM;
     ctx->default_steps = 4;
-    ctx->default_guidance = 1.0f;
     strncpy(ctx->model_name, "FLUX.2-klein-4B", sizeof(ctx->model_name) - 1);
     strncpy(ctx->model_version, "1.0", sizeof(ctx->model_version) - 1);
     strncpy(ctx->model_dir, model_dir, sizeof(ctx->model_dir) - 1);
@@ -301,7 +295,6 @@ flux_image *flux_generate(flux_ctx *ctx, const char *prompt,
     if (p.width <= 0) p.width = FLUX_DEFAULT_WIDTH;
     if (p.height <= 0) p.height = FLUX_DEFAULT_HEIGHT;
     if (p.num_steps <= 0) p.num_steps = 4;  /* Klein default */
-    if (p.guidance_scale <= 0) p.guidance_scale = 1.0f;
 
     /* Ensure dimensions are divisible by 16 */
     p.width = (p.width / 16) * 16;
@@ -347,9 +340,7 @@ flux_image *flux_generate(flux_ctx *ctx, const char *prompt,
         ctx->transformer, ctx->qwen3_encoder,
         z, 1, FLUX_LATENT_CHANNELS, latent_h, latent_w,
         text_emb, text_seq,
-        NULL,  /* No null embedding for klein */
         schedule, p.num_steps,
-        p.guidance_scale,
         NULL
     );
 
@@ -403,7 +394,6 @@ flux_image *flux_generate_with_embeddings(flux_ctx *ctx,
     if (p.width <= 0) p.width = FLUX_DEFAULT_WIDTH;
     if (p.height <= 0) p.height = FLUX_DEFAULT_HEIGHT;
     if (p.num_steps <= 0) p.num_steps = 4;
-    if (p.guidance_scale <= 0) p.guidance_scale = 1.0f;
 
     p.width = (p.width / 16) * 16;
     p.height = (p.height / 16) * 16;
@@ -431,10 +421,8 @@ flux_image *flux_generate_with_embeddings(flux_ctx *ctx,
         ctx->transformer, ctx->qwen3_encoder,
         z, 1, FLUX_LATENT_CHANNELS, latent_h, latent_w,
         text_emb, text_seq,
-        NULL,
         schedule, p.num_steps,
-        p.guidance_scale,
-        NULL
+        NULL  /* progress_callback */
     );
 
     free(z);
@@ -487,7 +475,6 @@ flux_image *flux_generate_with_embeddings_and_noise(flux_ctx *ctx,
     if (p.width <= 0) p.width = FLUX_DEFAULT_WIDTH;
     if (p.height <= 0) p.height = FLUX_DEFAULT_HEIGHT;
     if (p.num_steps <= 0) p.num_steps = 4;
-    if (p.guidance_scale <= 0) p.guidance_scale = 1.0f;
 
     p.width = (p.width / 16) * 16;
     p.height = (p.height / 16) * 16;
@@ -524,10 +511,8 @@ flux_image *flux_generate_with_embeddings_and_noise(flux_ctx *ctx,
         ctx->transformer, ctx->qwen3_encoder,
         z, 1, FLUX_LATENT_CHANNELS, latent_h, latent_w,
         text_emb, text_seq,
-        NULL,
         schedule, p.num_steps,
-        p.guidance_scale,
-        NULL
+        NULL  /* progress_callback */
     );
 
     free(z);
@@ -674,9 +659,9 @@ flux_image *flux_img2img(flux_ctx *ctx, const char *prompt,
         z, 1, FLUX_LATENT_CHANNELS, latent_h, latent_w,
         img_latent, latent_h, latent_w,  /* Reference latent */
         t_offset,
-        text_emb, text_seq, NULL,
+        text_emb, text_seq,
         schedule, num_steps,
-        p.guidance_scale, NULL
+        NULL  /* progress_callback */
     );
 
     free(z);
@@ -861,9 +846,9 @@ flux_image *flux_img2img_debug_py(flux_ctx *ctx, const flux_params *params) {
         noise, 1, FLUX_LATENT_CHANNELS, latent_h, latent_w,
         ref_latent, latent_h, latent_w,
         10,  /* t_offset */
-        text_emb, text_seq, NULL,
+        text_emb, text_seq,
         schedule, p.num_steps,
-        p.guidance_scale, NULL
+        NULL  /* progress_callback */
     );
 
     free(noise);

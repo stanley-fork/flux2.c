@@ -13,7 +13,6 @@
  *   -W, --width N         Output width (default: 256)
  *   -H, --height N        Output height (default: 256)
  *   -s, --steps N         Number of sampling steps (default: 4)
- *   -g, --guidance N      Guidance scale (default: 1.0)
  *   -S, --seed N          Random seed (-1 for random)
  *   -i, --input PATH      Input image for img2img
  *   -t, --strength N      Img2img strength (0.0-1.0)
@@ -199,7 +198,6 @@ static double timer_end(void) {
 #define DEFAULT_WIDTH 256
 #define DEFAULT_HEIGHT 256
 #define DEFAULT_STEPS 4
-#define DEFAULT_GUIDANCE 1.0f
 #define DEFAULT_STRENGTH 0.75f
 
 static void print_usage(const char *prog) {
@@ -213,7 +211,6 @@ static void print_usage(const char *prog) {
     fprintf(stderr, "  -W, --width N         Output width (default: %d)\n", DEFAULT_WIDTH);
     fprintf(stderr, "  -H, --height N        Output height (default: %d)\n", DEFAULT_HEIGHT);
     fprintf(stderr, "  -s, --steps N         Sampling steps (default: %d)\n", DEFAULT_STEPS);
-    fprintf(stderr, "  -g, --guidance N      Guidance scale (default: %.1f)\n", DEFAULT_GUIDANCE);
     fprintf(stderr, "  -S, --seed N          Random seed (-1 for random)\n\n");
     fprintf(stderr, "Image-to-image options:\n");
     fprintf(stderr, "  -i, --input PATH      Input image for img2img\n");
@@ -254,7 +251,6 @@ int main(int argc, char *argv[]) {
         {"width",      required_argument, 0, 'W'},
         {"height",     required_argument, 0, 'H'},
         {"steps",      required_argument, 0, 's'},
-        {"guidance",   required_argument, 0, 'g'},
         {"seed",       required_argument, 0, 'S'},
         {"input",      required_argument, 0, 'i'},
         {"strength",   required_argument, 0, 't'},
@@ -284,7 +280,6 @@ int main(int argc, char *argv[]) {
         .width = DEFAULT_WIDTH,
         .height = DEFAULT_HEIGHT,
         .num_steps = DEFAULT_STEPS,
-        .guidance_scale = DEFAULT_GUIDANCE,
         .seed = -1,
         .strength = DEFAULT_STRENGTH
     };
@@ -305,7 +300,6 @@ int main(int argc, char *argv[]) {
             case 'W': params.width = atoi(optarg); width_set = 1; break;
             case 'H': params.height = atoi(optarg); height_set = 1; break;
             case 's': params.num_steps = atoi(optarg); break;
-            case 'g': params.guidance_scale = atof(optarg); break;
             case 'S': params.seed = atoll(optarg); break;
             case 'i': input_path = optarg; break;
             case 't': params.strength = atof(optarg); break;

@@ -101,7 +101,6 @@ FLUX.2 uses **in-context conditioning** for image-to-image generation. Unlike tr
 -W, --width N         Output width in pixels (default: 256)
 -H, --height N        Output height in pixels (default: 256)
 -s, --steps N         Sampling steps (default: 4)
--g, --guidance N      Guidance scale (default: 1.0)
 -S, --seed N          Random seed for reproducibility
 ```
 
@@ -489,13 +488,12 @@ typedef struct {
     int width;              /* Output width in pixels (default: 256) */
     int height;             /* Output height in pixels (default: 256) */
     int num_steps;          /* Denoising steps, use 4 for klein (default: 4) */
-    float guidance_scale;   /* CFG scale, use 1.0 for klein (default: 1.0) */
     int64_t seed;           /* Random seed, -1 for random (default: -1) */
     float strength;         /* img2img only: 0.0-1.0 (default: 0.75) */
 } flux_params;
 
 /* Initialize with sensible defaults */
-#define FLUX_PARAMS_DEFAULT { 256, 256, 4, 1.0f, -1, 0.75f }
+#define FLUX_PARAMS_DEFAULT { 256, 256, 4, -1, 0.75f }
 ```
 
 ## Debugging

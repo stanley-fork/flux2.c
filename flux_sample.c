@@ -181,14 +181,11 @@ extern void flux_image_free(flux_image *img);
  * text_emb: text embeddings [seq_len, hidden]
  * schedule: timestep schedule [num_steps + 1]
  * num_steps: number of denoising steps
- * guidance_scale: classifier-free guidance scale (1.0 = no guidance)
  */
 float *flux_sample_euler(void *transformer, void *text_encoder,
                          float *z, int batch, int channels, int h, int w,
                          const float *text_emb, int text_seq,
-                         const float *null_emb,  /* For CFG */
                          const float *schedule, int num_steps,
-                         float guidance_scale,
                          void (*progress_callback)(int step, int total)) {
     (void)text_encoder;  /* Reserved for future use */
     flux_transformer_t *tf = (flux_transformer_t *)transformer;
@@ -197,11 +194,8 @@ float *flux_sample_euler(void *transformer, void *text_encoder,
     /* Working buffers */
     float *z_curr = (float *)malloc(latent_size * sizeof(float));
     float *v_cond = NULL;
-    float *v_uncond = NULL;
 
     flux_copy(z_curr, z, latent_size);
-
-    int use_cfg = (guidance_scale > 1.0f && null_emb != NULL);
 
     /* Reset timing counters */
     flux_reset_timing();
@@ -222,19 +216,6 @@ float *flux_sample_euler(void *transformer, void *text_encoder,
         /* Predict velocity with conditioning */
         v_cond = flux_transformer_forward(tf, z_curr, h, w,
                                           text_emb, text_seq, t_curr);
-
-        if (use_cfg) {
-            /* Predict unconditional velocity */
-            v_uncond = flux_transformer_forward(tf, z_curr, h, w,
-                                                null_emb, text_seq, t_curr);
-
-            /* CFG: v = v_uncond + scale * (v_cond - v_uncond) */
-            for (int i = 0; i < latent_size; i++) {
-                v_cond[i] = v_uncond[i] + guidance_scale * (v_cond[i] - v_uncond[i]);
-            }
-
-            free(v_uncond);
-        }
 
         /* Euler step: z_next = z_curr + dt * v */
         flux_axpy(z_curr, dt, v_cond, latent_size);
@@ -293,13 +274,9 @@ float *flux_sample_euler_with_refs(void *transformer, void *text_encoder,
                                    const float *ref_latent, int ref_h, int ref_w,
                                    int t_offset,
                                    const float *text_emb, int text_seq,
-                                   const float *null_emb,
                                    const float *schedule, int num_steps,
-                                   float guidance_scale,
                                    void (*progress_callback)(int step, int total)) {
     (void)text_encoder;  /* Reserved for future use */
-    (void)null_emb;      /* CFG not typically used with img2img */
-    (void)guidance_scale;
     flux_transformer_t *tf = (flux_transformer_t *)transformer;
     int latent_size = batch * channels * h * w;
 
@@ -372,9 +349,8 @@ float *flux_sample_euler_ancestral(void *transformer,
                                    float *z, int batch, int channels, int h, int w,
                                    const float *text_emb, int text_seq,
                                    const float *schedule, int num_steps,
-                                   float guidance_scale, float eta,
+                                   float eta,
                                    void (*progress_callback)(int step, int total)) {
-    (void)guidance_scale;  /* Reserved for CFG support */
     flux_transformer_t *tf = (flux_transformer_t *)transformer;
     int latent_size = batch * channels * h * w;
 
@@ -436,9 +412,7 @@ float *flux_sample_heun(void *transformer,
                         float *z, int batch, int channels, int h, int w,
                         const float *text_emb, int text_seq,
                         const float *schedule, int num_steps,
-                        float guidance_scale,
                         void (*progress_callback)(int step, int total)) {
-    (void)guidance_scale;  /* Reserved for CFG support */
     flux_transformer_t *tf = (flux_transformer_t *)transformer;
     int latent_size = batch * channels * h * w;
 
@@ -557,7 +531,7 @@ extern flux_ctx *flux_get_ctx(void);
 float *flux_generate_latent(void *ctx_ptr,
                             const float *text_emb, int text_seq,
                             int height, int width,
-                            int num_steps, float guidance_scale,
+                            int num_steps,
                             int64_t seed,
                             void (*progress_callback)(int step, int total)) {
     /* Compute latent dimensions */
@@ -571,14 +545,11 @@ float *flux_generate_latent(void *ctx_ptr,
     /* Get schedule (4 steps for klein distilled) */
     float *schedule = flux_linear_schedule(num_steps);
 
-    /* Sample */
-    /* Note: For klein, guidance_scale should be 1.0 (guidance-distilled) */
+    /* Sample (FLUX.2-klein is guidance-distilled, no CFG needed) */
     float *latent = flux_sample_euler(ctx_ptr, NULL,
                                       z, 1, channels, latent_h, latent_w,
                                       text_emb, text_seq,
-                                      NULL,  /* No null embedding for klein */
                                       schedule, num_steps,
-                                      guidance_scale,
                                       progress_callback);
 
     free(z);
