@@ -105,11 +105,14 @@ extern float *flux_sample_euler_cfg_with_multi_refs(void *transformer, void *tex
                                                      void (*progress_callback)(int step, int total));
 
 extern float *flux_linear_schedule(int num_steps);
+extern float *flux_power_schedule(int num_steps, float alpha);
 extern float *flux_official_schedule(int num_steps, int image_seq_len);
 extern float *flux_init_noise(int batch, int channels, int h, int w, int64_t seed);
 
-/* Return schedule based on params: linear if requested, otherwise official shifted sigmoid. */
+/* Return schedule based on params: linear, power, or official shifted sigmoid. */
 static float *flux_selected_schedule(const flux_params *p, int image_seq_len) {
+    if (p->power_schedule)
+        return flux_power_schedule(p->num_steps, p->power_alpha);
     if (p->linear_schedule)
         return flux_linear_schedule(p->num_steps);
     return flux_official_schedule(p->num_steps, image_seq_len);

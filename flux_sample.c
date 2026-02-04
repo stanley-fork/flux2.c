@@ -55,6 +55,20 @@ float *flux_linear_schedule(int num_steps) {
 }
 
 /*
+ * Power schedule: denser steps at the start (high noise), sparser at the end.
+ * schedule[i] = 1 - (i/n)^alpha
+ * alpha=1.0 is linear, alpha=2.0 is quadratic, etc.
+ */
+float *flux_power_schedule(int num_steps, float alpha) {
+    float *schedule = (float *)malloc((num_steps + 1) * sizeof(float));
+    for (int i = 0; i <= num_steps; i++) {
+        float t = (float)i / (float)num_steps;
+        schedule[i] = 1.0f - powf(t, alpha);
+    }
+    return schedule;
+}
+
+/*
  * Shifted sigmoid schedule (better for flow matching)
  * shift controls where the inflection point is
  */

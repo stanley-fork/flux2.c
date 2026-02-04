@@ -59,6 +59,8 @@ typedef struct {
     float guidance;
     int64_t seed;
     int linear_schedule;
+    int power_schedule;
+    float power_alpha;
     int image_count;
     int show_enabled;
     int open_enabled;
@@ -316,6 +318,8 @@ static int generate_image(const char *prompt, const char *ref_image,
     params.num_steps = state.steps;
     params.guidance = state.guidance;
     params.linear_schedule = state.linear_schedule;
+    params.power_schedule = state.power_schedule;
+    params.power_alpha = state.power_alpha;
 
     /* Determine seed */
     int64_t actual_seed;
@@ -428,6 +432,8 @@ static int generate_multiref(const char *prompt, const char **ref_paths, int num
     params.num_steps = state.steps;
     params.guidance = state.guidance;
     params.linear_schedule = state.linear_schedule;
+    params.power_schedule = state.power_schedule;
+    params.power_alpha = state.power_alpha;
 
     /* Determine seed */
     int64_t actual_seed;
@@ -521,6 +527,7 @@ static void cmd_help(void) {
     printf("  !steps <n>            Set sampling steps (0 = auto)\n");
     printf("  !guidance <n>         Set CFG guidance scale (0 = auto)\n");
     printf("  !linear               Toggle linear timestep schedule\n");
+    printf("  !power [alpha]        Toggle power schedule (default alpha: 2.0)\n");
     printf("  !explore <n> <prompt> Generate n thumbnail variations\n");
     printf("  !show                 Toggle terminal display\n");
     printf("  !zoom <n>             Set display zoom (default: 2 for Retina)\n");
@@ -743,6 +750,8 @@ static void cmd_explore(char *arg) {
     params.num_steps = state.steps;
     params.guidance = state.guidance;
     params.linear_schedule = state.linear_schedule;
+    params.power_schedule = state.power_schedule;
+    params.power_alpha = state.power_alpha;
 
     if (!flux_is_distilled(state.ctx)) {
         /* Base model: use flux_generate() for CFG support */
@@ -855,7 +864,20 @@ static int process_command(char *line) {
         cmd_guidance(cmd + 8);
     } else if (starts_with_ci(cmd, "linear")) {
         state.linear_schedule = !state.linear_schedule;
+        if (state.linear_schedule) state.power_schedule = 0;
         printf("Schedule: %s\n", state.linear_schedule ? "linear" : "shifted sigmoid");
+    } else if (starts_with_ci(cmd, "power")) {
+        char *arg = skip_spaces(cmd + 5);
+        if (*arg) {
+            float val = atof(arg);
+            if (val > 0) state.power_alpha = val;
+        }
+        state.power_schedule = !state.power_schedule;
+        if (state.power_schedule) state.linear_schedule = 0;
+        printf("Schedule: %s\n", state.power_schedule ?
+               "power" : "shifted sigmoid");
+        if (state.power_schedule)
+            printf("Power alpha: %.1f\n", state.power_alpha);
     } else if (starts_with_ci(cmd, "explore")) {
         cmd_explore(cmd + 7);
     } else if (starts_with_ci(cmd, "show")) {
@@ -986,6 +1008,7 @@ int flux_cli_run(flux_ctx *ctx, const char *model_dir) {
     state.steps = flux_is_distilled(ctx) ? 4 : 50;
     state.guidance = 0.0f;  /* 0 = auto from model type */
     state.seed = -1;
+    state.power_alpha = 2.0f;
 
     /* Initialize embedding cache */
     emb_cache_init();

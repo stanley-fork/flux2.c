@@ -158,7 +158,7 @@ Done -> /tmp/flux-.../image-0003.png (ref $2)
 - `$N prompt` - img2img with reference $N
 - `$0 $3 prompt` - multi-reference (combine images)
 
-**Commands:** `!help`, `!save`, `!load`, `!seed`, `!size`, `!steps`, `!guidance`, `!linear`, `!explore`, `!show`, `!quit`
+**Commands:** `!help`, `!save`, `!load`, `!seed`, `!size`, `!steps`, `!guidance`, `!linear`, `!power`, `!explore`, `!show`, `!quit`
 
 ### Command Line Options
 
@@ -177,6 +177,8 @@ Done -> /tmp/flux-.../image-0003.png (ref $2)
 -S, --seed N          Random seed for reproducibility
 -g, --guidance N      CFG guidance scale (default: auto, 1.0 distilled / 4.0 base)
     --linear          Use linear timestep schedule (see below)
+    --power           Use power curve timestep schedule (see below)
+    --power-alpha N   Set power schedule exponent (default: 2.0)
     --base            Force base model mode (undistilled, CFG enabled)
 ```
 
@@ -367,16 +369,32 @@ The model type is autodetected from `model_index.json` in the model directory. U
 
 ## Timestep Schedule
 
-By default, denoising uses a **shifted sigmoid** timestep schedule (matching the official BFL implementation). This schedule concentrates most steps in the high-noise regime and rushes through the detail-forming region near t=0. For the 4 steps distilled model, this is definitely the way to go, and changing scheduler will produce proor results. However, for the base model, it may look extremely unbalanced — for example at 10 steps, the first 5 steps cover only 12% of the denoising trajectory while the last 5 steps cover 88%. Still, the base model works well with this scheduler, but after some testing I decided to add the `--linear` flag in order to switch to a uniform timestep schedule, where each step covers an equal portion of the trajectory. This sometimes produces better results with the **base model**, at least more realistic looking results, especially at reduced step count (10 steps, for instance, which is 1/5 of execution time compared to the default 50 steps), since the linear schedule avoids the huge final steps that the shifted sigmoid creates, and this alters the generation in a significant way, often in interesting ways.
+By default, denoising uses a **shifted sigmoid** timestep schedule (matching the official BFL implementation). This schedule concentrates most steps in the high-noise regime and rushes through the detail-forming region near t=0. For the 4 steps distilled model, this is definitely the way to go, and changing scheduler will produce proor results.
+
+### Linear scheduling
+
+However, for the base model, the shifted sigmoid shceduler may look extremely unbalanced — for example at 10 steps, the first 5 steps cover only 12% of the denoising trajectory while the last 5 steps cover 88%. Still, the base model works well with this scheduler, but after some testing I decided to add the `--linear` flag in order to switch to a uniform timestep schedule, where each step covers an equal portion of the trajectory. This sometimes produces better results with the **base model**, at least more realistic looking results, especially at reduced step count (10 steps, for instance, which is 1/5 of execution time compared to the default 50 steps), since the linear schedule avoids the huge final steps that the shifted sigmoid creates, and this alters the generation in a significant way, often in interesting ways.
+
+### Power curve scheduler
+
+The `--power` flag provides a middle ground: a power curve schedule (`t = 1 - (i/n)^α`) that is denser at the start and sparser at the end, but less extreme than the shifted sigmoid. The default exponent is 2.0 (quadratic); use `--power-alpha` to adjust it (1.0 = linear, higher = more front-loaded).
 
 ```bash
 # Base model with 10 steps and linear schedule
 ./flux -d flux-klein-base-model -p "a cat" -o cat.png -s 10 --linear
+
+# Base model with power schedule (quadratic by default)
+./flux -d flux-klein-base-model -p "a cat" -o cat.png -s 10 --power
+
+# Power schedule with custom exponent
+./flux -d flux-klein-base-model -p "a cat" -o cat.png -s 10 --power-alpha 1.5
 ```
 
-In interactive CLI mode, toggle with `!linear`.
+In interactive CLI mode, toggle with `!linear` or `!power [alpha]`.
 
-Note: for the distilled model (4 steps), the shifted sigmoid schedule is part of the distillation training, so `--linear` is not recommended.
+**Note**: for the distilled model (4 steps), the shifted sigmoid schedule is part of the distillation training, so alternative schedules are not recommended.
+
+If you have a terminal supporting the iTerm2 or Kitty terminal graphics protocols, it is strongly suggested to test the different schedulers with --show and --show-steps options. It is quite an experience to see the denoising process happening in different ways.
 
 ## Memory Requirements
 
@@ -597,10 +615,12 @@ typedef struct {
     int64_t seed;           /* Random seed, -1 for random (default: -1) */
     float guidance;         /* CFG guidance scale, 0 = auto (1.0 distilled, 4.0 base) */
     int linear_schedule;    /* Use linear timestep schedule (0 = shifted sigmoid) */
+    int power_schedule;     /* Use power curve timestep schedule */
+    float power_alpha;      /* Exponent for power schedule (default: 2.0) */
 } flux_params;
 
 /* Initialize with sensible defaults (auto steps and guidance from model type) */
-#define FLUX_PARAMS_DEFAULT { 256, 256, 0, -1, 0.0f, 0 }
+#define FLUX_PARAMS_DEFAULT { 256, 256, 0, -1, 0.0f, 0, 0, 2.0f }
 ```
 
 ## Debugging

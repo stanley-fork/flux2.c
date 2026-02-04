@@ -214,7 +214,9 @@ static void print_usage(const char *prog) {
     fprintf(stderr, "  -s, --steps N         Sampling steps (default: auto, 4 distilled / 50 base)\n");
     fprintf(stderr, "  -g, --guidance N      CFG guidance scale (default: auto, 1.0 distilled / 4.0 base)\n");
     fprintf(stderr, "  -S, --seed N          Random seed (-1 for random)\n");
-    fprintf(stderr, "      --linear          Use linear timestep schedule (default: shifted sigmoid)\n\n");
+    fprintf(stderr, "      --linear          Use linear timestep schedule (default: shifted sigmoid)\n");
+    fprintf(stderr, "      --power           Use power curve timestep schedule (default alpha: 2.0)\n");
+    fprintf(stderr, "      --power-alpha N   Set power schedule exponent (default: 2.0)\n\n");
     fprintf(stderr, "Model options:\n");
     fprintf(stderr, "      --base            Force base model mode (undistilled, CFG enabled)\n\n");
     fprintf(stderr, "Reference images (img2img / multi-reference):\n");
@@ -274,6 +276,8 @@ int main(int argc, char *argv[]) {
         {"zoom",       required_argument, 0, 'z'},
         {"base",       no_argument,       0, 'B'},
         {"linear",     no_argument,       0, 'L'},
+        {"power",      no_argument,       0, 256},
+        {"power-alpha",required_argument, 0, 257},
         {"debug-py",   no_argument,       0, 'D'},
         {0, 0, 0, 0}
     };
@@ -292,7 +296,8 @@ int main(int argc, char *argv[]) {
         .height = DEFAULT_HEIGHT,
         .num_steps = 0,   /* 0 = auto from model type */
         .seed = -1,
-        .guidance = 0.0f  /* 0 = auto from model type */
+        .guidance = 0.0f, /* 0 = auto from model type */
+        .power_alpha = 2.0f
     };
 
     int width_set = 0, height_set = 0, steps_set = 0;
@@ -337,6 +342,8 @@ int main(int argc, char *argv[]) {
             case 'z': terminal_set_zoom(atoi(optarg)); break;
             case 'B': force_base = 1; break;
             case 'L': params.linear_schedule = 1; break;
+            case 256: params.power_schedule = 1; break;
+            case 257: params.power_alpha = atof(optarg); params.power_schedule = 1; break;
             case 'D': debug_py = 1; break;
             default:
                 print_usage(argv[0]);
