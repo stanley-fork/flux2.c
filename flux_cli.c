@@ -63,6 +63,7 @@ typedef struct {
     float power_alpha;
     int image_count;
     int show_enabled;
+    int show_steps_enabled;
     int open_enabled;
     /* Reference tracking (dynamic array, never forgets) */
     cli_ref *refs;               /* Dynamic array of references */
@@ -226,6 +227,12 @@ static void get_image_path(char *buf, size_t size) {
  * Image Display
  * ====================================================================== */
 
+static void cli_step_image_cb(int step, int total, const flux_image *img) {
+    (void)total;
+    fprintf(stderr, "\n[Step %d]\n", step);
+    terminal_display_image(img, cli_term_proto);
+}
+
 static void display_image(const char *path) {
     if (state.show_enabled) {
         flux_image *img = flux_image_load(path);
@@ -337,6 +344,8 @@ static int generate_image(const char *prompt, const char *ref_image,
 
     /* Set up progress callbacks */
     cli_progress_start();
+    if (state.show_steps_enabled)
+        flux_set_step_image_callback(state.ctx, cli_step_image_cb);
 
     /* Generate */
     flux_image *img;
@@ -399,6 +408,7 @@ static int generate_image(const char *prompt, const char *ref_image,
     }
 
     cli_progress_end();
+    flux_set_step_image_callback(state.ctx, NULL);
 
     /* End timing */
     clock_gettime(CLOCK_MONOTONIC, &end_time);
@@ -474,6 +484,8 @@ static int generate_multiref(const char *prompt, const char **ref_paths, int num
            params.width, params.height, num_refs);
 
     cli_progress_start();
+    if (state.show_steps_enabled)
+        flux_set_step_image_callback(state.ctx, cli_step_image_cb);
 
     flux_image *img = flux_multiref(state.ctx, prompt,
                                      (const flux_image **)refs, num_refs, &params);
@@ -485,6 +497,7 @@ static int generate_multiref(const char *prompt, const char **ref_paths, int num
     free(refs);
 
     cli_progress_end();
+    flux_set_step_image_callback(state.ctx, NULL);
 
     /* End timing */
     clock_gettime(CLOCK_MONOTONIC, &end_time);
@@ -530,6 +543,7 @@ static void cmd_help(void) {
     printf("  !power [alpha]        Toggle power schedule (default alpha: 2.0)\n");
     printf("  !explore <n> <prompt> Generate n thumbnail variations\n");
     printf("  !show                 Toggle terminal display\n");
+    printf("  !show-steps           Toggle showing each denoising step\n");
     printf("  !zoom <n>             Set display zoom (default: 2 for Retina)\n");
     printf("  !open                 Toggle auto-open (macOS)\n");
     printf("  !quit                 Exit\n");
@@ -819,6 +833,16 @@ static void cmd_show(void) {
     printf("Display: %s\n", state.show_enabled ? "ON" : "OFF");
 }
 
+static void cmd_show_steps(void) {
+    if (cli_term_proto == TERM_PROTO_NONE) {
+        fprintf(stderr, "Error: show-steps requires a supported terminal "
+                        "(Kitty, Ghostty, iTerm2, or Konsole)\n");
+        return;
+    }
+    state.show_steps_enabled = !state.show_steps_enabled;
+    printf("Show steps: %s\n", state.show_steps_enabled ? "ON" : "OFF");
+}
+
 static void cmd_zoom(char *arg) {
     arg = skip_spaces(arg);
     if (*arg) {
@@ -880,7 +904,11 @@ static int process_command(char *line) {
             printf("Power alpha: %.1f\n", state.power_alpha);
     } else if (starts_with_ci(cmd, "explore")) {
         cmd_explore(cmd + 7);
-    } else if (starts_with_ci(cmd, "show")) {
+    } else if (starts_with_ci(cmd, "show-steps") ||
+               starts_with_ci(cmd, "showsteps")) {
+        cmd_show_steps();
+    } else if (starts_with_ci(cmd, "show") &&
+               (cmd[4] == '\0' || isspace((unsigned char)cmd[4]))) {
         cmd_show();
     } else if (starts_with_ci(cmd, "zoom")) {
         cmd_zoom(cmd + 4);
