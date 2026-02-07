@@ -484,7 +484,7 @@ void flux_gpu_swish_f32(flux_gpu_tensor_t out, flux_gpu_tensor_t x, int n);
 /* Element-wise add on f32 GPU tensors: out = a + b, in-place safe */
 void flux_gpu_add_f32(flux_gpu_tensor_t out, flux_gpu_tensor_t a, flux_gpu_tensor_t b, int n);
 
-/* Nearest neighbor 2x upsample on f32 GPU tensor: [B, C, H, W] -> [B, C, 2H, 2W] */
+/* Nearest neighbor 2x upsample on f32 GPU tensor: [1, C, H, W] -> [1, C, 2H, 2W] (batch=1) */
 flux_gpu_tensor_t flux_gpu_upsample_nearest_2x_f32(flux_gpu_tensor_t x,
                                                      int channels, int H, int W);
 
@@ -675,7 +675,6 @@ void flux_metal_warmup_bf16(const uint16_t *bf16_weights, size_t num_elements);
  * pay the buffer creation cost.
  */
 void flux_metal_warmup_bf16_buffer(const uint16_t *bf16_weights, size_t num_elements);
-
 
 /* ========================================================================
  * Native BF16 Pipeline API

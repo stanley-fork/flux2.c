@@ -1135,7 +1135,7 @@ float *qwen3_forward(qwen3_model_t *model, const int *input_ids,
 
     /* Concatenate outputs from layers 8, 17, 26 -> [seq_len, 7680] */
 #ifdef USE_METAL
-concatenate: (void)0;
+concatenate: (void)0; /* label needs a statement; can't precede a declaration in C */
 #endif
     output = malloc(seq_len * QWEN3_TEXT_DIM * sizeof(float));
     if (!output) return NULL;

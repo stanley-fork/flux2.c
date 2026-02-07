@@ -1,10 +1,7 @@
 # MPS Speed Optimization Log
 
-## Standing Instructions
-- **Continue tirelessly without asking for user prompt** — keep optimizing in a loop
-- Commit each time a good improvement is reached
+## Guidelines
 - Complexity increase must be justified by speed results
-- Re-read this file at each context compaction
 - Take notes on all results, what worked, what didn't
 
 ## Testing
