@@ -266,6 +266,25 @@ safetensors_file_t *safetensors_open(const char *path) {
         return NULL;
     }
 
+    /* Validate that all tensor data fits within the file.
+     * Catches truncated downloads before they cause segfaults. */
+    size_t data_region = file_size - 8 - (size_t)header_size;
+    for (int i = 0; i < sf->num_tensors; i++) {
+        safetensor_t *t = &sf->tensors[i];
+        if (t->data_offset + t->data_size > data_region) {
+            fprintf(stderr, "safetensors_open: %s: truncated file\n"
+                    "  tensor '%s' needs data at offset %zu-%zu, "
+                    "but file only has %zu bytes of tensor data.\n"
+                    "  The file may be from an interrupted download. "
+                    "Re-download it.\n",
+                    path, t->name,
+                    t->data_offset, t->data_offset + t->data_size,
+                    data_region);
+            safetensors_close(sf);
+            return NULL;
+        }
+    }
+
     return sf;
 }
 
