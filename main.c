@@ -30,9 +30,22 @@
 #include <getopt.h>
 #include <time.h>
 #include <sys/time.h>
+#include <unistd.h>
 
 #ifdef USE_METAL
 #include "flux_metal.h"
+#endif
+
+#ifdef USE_BLAS
+#ifdef __APPLE__
+#include <sys/sysctl.h>
+#else
+/* OpenBLAS introspection functions */
+extern int openblas_get_num_threads(void);
+extern int openblas_get_num_procs(void);
+extern char *openblas_get_corename(void);
+extern char *openblas_get_config(void);
+#endif
 #endif
 
 /* ========================================================================
@@ -247,7 +260,21 @@ int main(int argc, char *argv[]) {
 #ifdef USE_METAL
     flux_metal_init();
 #elif defined(USE_BLAS)
-    fprintf(stderr, "BLAS: CPU acceleration enabled (Accelerate/OpenBLAS)\n");
+    {
+#ifdef __APPLE__
+        char cpu_brand[128] = "Apple Silicon";
+        size_t len = sizeof(cpu_brand);
+        sysctlbyname("machdep.cpu.brand_string", cpu_brand, &len, NULL, 0);
+        long ncpu = sysconf(_SC_NPROCESSORS_ONLN);
+        fprintf(stderr, "BLAS: Accelerate | %s | %ld cores\n", cpu_brand, ncpu);
+#else
+        fprintf(stderr, "BLAS: OpenBLAS | %s | %d threads / %d procs\n",
+                openblas_get_corename(),
+                openblas_get_num_threads(),
+                openblas_get_num_procs());
+        fprintf(stderr, "      %s\n", openblas_get_config());
+#endif
+    }
 #else
     fprintf(stderr, "Generic: Pure C backend (no acceleration)\n");
 #endif
