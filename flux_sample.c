@@ -169,6 +169,9 @@ float *flux_official_schedule(int num_steps, int image_seq_len) {
 typedef struct flux_transformer flux_transformer_t;
 typedef struct flux_vae flux_vae_t;
 
+/* Free cached mmap weights after denoising */
+extern void flux_transformer_free_mmap_cache(flux_transformer_t *tf);
+
 /* Forward declarations */
 extern float *flux_transformer_forward(flux_transformer_t *tf,
                                        const float *img_latent, int img_h, int img_w,
@@ -283,9 +286,13 @@ float *flux_sample_euler(void *transformer, void *text_encoder,
             fprintf(stderr, "    Final layer:   %.1f ms (%.1f%%)\n",
                     flux_timing_transformer_final, 100.0 * flux_timing_transformer_final / flux_timing_transformer_total);
             fprintf(stderr, "    Total:         %.1f ms\n", flux_timing_transformer_total);
+            /* Print fine-grained single block profile if available */
+            extern void flux_print_blas_profile(void);
+            flux_print_blas_profile();
         }
     }
 
+    flux_transformer_free_mmap_cache(tf);
     return z_curr;
 }
 
@@ -371,6 +378,7 @@ float *flux_sample_euler_with_refs(void *transformer, void *text_encoder,
         fprintf(stderr, "  Total denoising: %.1f ms (%.2f s)\n", total_denoising, total_denoising / 1000.0);
     }
 
+    flux_transformer_free_mmap_cache(tf);
     return z_curr;
 }
 
@@ -440,6 +448,7 @@ float *flux_sample_euler_with_multi_refs(void *transformer, void *text_encoder,
         fprintf(stderr, "  Total denoising: %.1f ms (%.2f s)\n", total_denoising, total_denoising / 1000.0);
     }
 
+    flux_transformer_free_mmap_cache(tf);
     return z_curr;
 }
 
@@ -525,6 +534,7 @@ float *flux_sample_euler_cfg(void *transformer, void *text_encoder,
         fprintf(stderr, "  Total denoising: %.1f ms (%.2f s)\n", total_denoising, total_denoising / 1000.0);
     }
 
+    flux_transformer_free_mmap_cache(tf);
     return z_curr;
 }
 
@@ -606,6 +616,7 @@ float *flux_sample_euler_cfg_with_refs(void *transformer, void *text_encoder,
         fprintf(stderr, "  Total denoising: %.1f ms (%.2f s)\n", total_denoising, total_denoising / 1000.0);
     }
 
+    flux_transformer_free_mmap_cache(tf);
     return z_curr;
 }
 
@@ -687,6 +698,7 @@ float *flux_sample_euler_cfg_with_multi_refs(void *transformer, void *text_encod
         fprintf(stderr, "  Total denoising: %.1f ms (%.2f s)\n", total_denoising, total_denoising / 1000.0);
     }
 
+    flux_transformer_free_mmap_cache(tf);
     return z_curr;
 }
 
@@ -745,6 +757,7 @@ float *flux_sample_euler_ancestral(void *transformer,
     }
 
     free(noise);
+    flux_transformer_free_mmap_cache(tf);
     return z_curr;
 }
 
@@ -817,6 +830,7 @@ float *flux_sample_heun(void *transformer,
     }
 
     free(z_pred);
+    flux_transformer_free_mmap_cache(tf);
     return z_curr;
 }
 

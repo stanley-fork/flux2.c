@@ -124,7 +124,6 @@ struct qwen3_model {
 
     /* Pre-allocated attention work buffers (avoid per-call allocation) */
     float *attn_q_head;       /* [seq_len, head_dim] */
-    float *attn_k_head_t;     /* [head_dim, seq_len] */
     float *attn_v_head;       /* [seq_len, head_dim] */
     float *attn_out_head;     /* [seq_len, head_dim] */
 
@@ -233,12 +232,6 @@ static void qwen3_head_rms_norm(float *out, const float *x, const float *weight,
     }
 }
 
-static void qwen3_silu(float *x, int n) {
-    for (int i = 0; i < n; i++) {
-        x[i] = x[i] / (1.0f + expf(-x[i]));
-    }
-}
-
 static void qwen3_softmax(float *x, int len) {
     float max_val = x[0];
     for (int i = 1; i < len; i++) {
@@ -247,7 +240,7 @@ static void qwen3_softmax(float *x, int len) {
 
     float sum = 0.0f;
     for (int i = 0; i < len; i++) {
-        x[i] = expf(x[i] - max_val);
+        x[i] = fast_expf(x[i] - max_val);
         sum += x[i];
     }
 
@@ -373,40 +366,31 @@ static void qwen3_attention_forward(qwen3_model_t *model, qwen3_layer_t *layer,
     {
         int heads_per_kv = num_heads / num_kv_heads;
 
-        /* Use pre-allocated work buffer for K transpose (Q, V, output use strided access) */
-        float *k_head_t = model->attn_k_head_t;
-
         for (int h = 0; h < num_heads; h++) {
             int kv_h = h / heads_per_kv;  /* Which KV head to use */
             float *scores = model->attn_scores + h * seq_len * seq_len;
 
-            /* Q can be accessed directly with strided lda (avoids copy)
-             * Q[s,d] = q_buf[s * q_dim + h * head_dim + d]
-             * Use pointer to head h with lda = q_dim */
+            /* Q accessed directly with strided lda (avoids copy)
+             * Q[s,d] = q_buf[s * q_dim + h * head_dim + d] */
             const float *q_strided = model->q_buf + h * head_dim;
 
-            /* K still needs transpose: K^T[d,s] = K[s,kv_h,d]
-             * This requires explicit transpose since we need [head_dim, seq_len] layout */
-            for (int s = 0; s < seq_len; s++) {
-                for (int d = 0; d < head_dim; d++) {
-                    k_head_t[d * seq_len + s] = model->k_buf[s * kv_dim + kv_h * head_dim + d];
-                }
-            }
+            /* K accessed directly with strided lda + CblasTrans (avoids transpose)
+             * K[s,d] = k_buf[s * kv_dim + kv_h * head_dim + d] */
+            const float *k_strided = model->k_buf + kv_h * head_dim;
 
-            /* scores = scale * Q @ K^T using strided BLAS
-             * Q: [seq_len, head_dim] with lda=q_dim, K^T: [head_dim, seq_len] */
+            /* scores = scale * Q @ K^T using strided BLAS */
 #ifdef USE_BLAS
-            cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+            cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
                         seq_len, seq_len, head_dim,
-                        scale, q_strided, q_dim, k_head_t, seq_len,
+                        scale, q_strided, q_dim, k_strided, kv_dim,
                         0.0f, scores, seq_len);
 #else
-            /* Fallback: naive matmul with strided Q access */
+            /* Fallback: naive matmul */
             for (int i = 0; i < seq_len; i++) {
                 for (int j = 0; j < seq_len; j++) {
                     float dot = 0.0f;
                     for (int d = 0; d < head_dim; d++) {
-                        dot += q_strided[i * q_dim + d] * k_head_t[d * seq_len + j];
+                        dot += q_strided[i * q_dim + d] * k_strided[j * kv_dim + d];
                     }
                     scores[i * seq_len + j] = dot * scale;
                 }
@@ -479,12 +463,8 @@ static void qwen3_mlp_forward(qwen3_model_t *model, qwen3_layer_t *layer, int se
     qwen3_linear(model->mlp_up, model->norm_buf, layer->mlp.up_proj_weight,
                  seq_len, hidden, intermediate);
 
-    /* SwiGLU: silu(gate) * up */
-    int n = seq_len * intermediate;
-    qwen3_silu(model->mlp_gate, n);
-    for (int i = 0; i < n; i++) {
-        model->mlp_gate[i] *= model->mlp_up[i];
-    }
+    /* SwiGLU: silu(gate) * up - fused for better performance */
+    flux_silu_mul(model->mlp_gate, model->mlp_up, seq_len * intermediate);
 
     /* Down projection */
     qwen3_linear(model->mlp_out, model->mlp_gate, layer->mlp.down_proj_weight,
@@ -1520,7 +1500,6 @@ static void qwen3_alloc_work_buffers(qwen3_model_t *model) {
     model->norm_buf = malloc(seq_len * hidden * sizeof(float));
 
     model->attn_q_head = malloc(seq_len * head_dim * sizeof(float));
-    model->attn_k_head_t = malloc(head_dim * seq_len * sizeof(float));
     model->attn_v_head = malloc(seq_len * head_dim * sizeof(float));
     model->attn_out_head = malloc(seq_len * head_dim * sizeof(float));
 
@@ -1710,7 +1689,6 @@ void qwen3_model_free(qwen3_model_t *model) {
 
     /* Free attention work buffers */
     free(model->attn_q_head);
-    free(model->attn_k_head_t);
     free(model->attn_v_head);
     free(model->attn_out_head);
 

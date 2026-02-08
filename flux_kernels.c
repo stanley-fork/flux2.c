@@ -28,6 +28,8 @@
 /* Minimum matrix size to use GPU (smaller matrices are faster on CPU) */
 #define MIN_GPU_ELEMENTS (512 * 512)
 
+/* fast_expf is defined in flux_kernels.h */
+
 /* Progress callbacks - set by caller before inference */
 flux_substep_callback_t flux_substep_callback = NULL;
 flux_step_callback_t flux_step_callback = NULL;
@@ -402,28 +404,15 @@ void flux_conv2d(float *out, const float *in, const float *weight, const float *
              * where K = in_ch * kH * kW */
             int K = in_ch * kH * kW;
 
-            /* Allocate temporary contiguous buffer for tile output */
-            float *tmp = malloc((size_t)out_ch * tile_pixels * sizeof(float));
-            if (!tmp) {
-                free(col);
-                goto naive_fallback;
-            }
-
-            /* sgemm: tmp[out_ch, tile_pixels] = weight[out_ch, K] @ col[K, tile_pixels] */
+            /* Write sgemm output directly to out_b using strided ldc.
+             * Row oc of sgemm output goes to out_b[oc * outH*outW + tile_start*outW],
+             * which is exactly the right position in NCHW layout. */
+            float *out_tile = out_b + tile_start * outW;
             cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
                         out_ch, tile_pixels, K,
                         1.0f, weight, K,
                         col, tile_pixels,
-                        0.0f, tmp, tile_pixels);
-
-            /* Scatter tile output to correct positions in out_b */
-            for (int oc = 0; oc < out_ch; oc++) {
-                float *out_tile = out_b + oc * outH * outW + tile_start * outW;
-                float *tmp_row = tmp + oc * tile_pixels;
-                memcpy(out_tile, tmp_row, tile_pixels * sizeof(float));
-            }
-
-            free(tmp);
+                        0.0f, out_tile, outH * outW);
         }
 
         /* Add bias */
@@ -589,20 +578,27 @@ void flux_silu(float *x, int n) {
 
     for (int i = 0; i < n; i++) {
         float val = x[i];
-        x[i] = val / (1.0f + expf(-val));
+        x[i] = val / (1.0f + fast_expf(-val));
     }
 }
 
-void flux_softmax(float *x, int rows, int cols) {
+/* Fused SiLU(gate) * up in a single pass - avoids double memory traversal */
+void flux_silu_mul(float *gate, const float *up, int n) {
 #ifdef USE_METAL
-    /* Use GPU only for very large softmax operations
-     * Sync overhead usually dominates for smaller ops */
-    if (flux_metal_shaders_available() && (size_t)rows * cols >= 4 * 1024 * 1024) {
-        flux_metal_softmax(x, rows, cols);
+    if (flux_metal_shaders_available() && n >= 4 * 1024 * 1024) {
+        flux_metal_silu_mul(gate, up, n);
         return;
     }
 #endif
 
+    for (int i = 0; i < n; i++) {
+        float val = gate[i];
+        gate[i] = (val / (1.0f + fast_expf(-val))) * up[i];
+    }
+}
+
+/* CPU-only softmax. Safe to call from worker threads (no Metal dispatch). */
+void flux_softmax_cpu(float *x, int rows, int cols) {
     for (int r = 0; r < rows; r++) {
         float *row = x + r * cols;
 
@@ -615,7 +611,7 @@ void flux_softmax(float *x, int rows, int cols) {
         /* Compute exp and sum */
         float sum = 0.0f;
         for (int c = 0; c < cols; c++) {
-            row[c] = expf(row[c] - max_val);
+            row[c] = fast_expf(row[c] - max_val);
             sum += row[c];
         }
 
@@ -625,6 +621,18 @@ void flux_softmax(float *x, int rows, int cols) {
             row[c] *= inv_sum;
         }
     }
+}
+
+void flux_softmax(float *x, int rows, int cols) {
+#ifdef USE_METAL
+    /* Use GPU only for very large softmax operations
+     * Sync overhead usually dominates for smaller ops */
+    if (flux_metal_shaders_available() && (size_t)rows * cols >= 4 * 1024 * 1024) {
+        flux_metal_softmax(x, rows, cols);
+        return;
+    }
+#endif
+    flux_softmax_cpu(x, rows, cols);
 }
 
 /* ========================================================================
@@ -729,7 +737,7 @@ static void flash_attention_head(float *out,
             /* Online softmax update */
             if (score > max_score) {
                 /* New maximum found - rescale previous accumulations */
-                float correction = expf(max_score - score);
+                float correction = fast_expf(max_score - score);
                 sum_exp = sum_exp * correction + 1.0f;
                 for (int d = 0; d < head_dim; d++) {
                     o_row[d] = o_row[d] * correction + v_row[d];
@@ -737,7 +745,7 @@ static void flash_attention_head(float *out,
                 max_score = score;
             } else {
                 /* Score is less than current max */
-                float weight = expf(score - max_score);
+                float weight = fast_expf(score - max_score);
                 sum_exp += weight;
                 for (int d = 0; d < head_dim; d++) {
                     o_row[d] += weight * v_row[d];
@@ -828,7 +836,7 @@ static void flash_attention_head_tiled(float *out,
 
                 /* Rescale old accumulations if needed */
                 if (old_max > -1e29f) {  /* Check if we have prior accumulations */
-                    float correction = expf(old_max - new_max);
+                    float correction = fast_expf(old_max - new_max);
                     sum_exps[i] *= correction;
                     for (int d = 0; d < head_dim; d++) {
                         o_row[d] *= correction;
@@ -837,7 +845,7 @@ static void flash_attention_head_tiled(float *out,
 
                 /* Accumulate this tile's contribution */
                 for (int ki = 0; ki < k_len; ki++) {
-                    float weight = expf(score_row[ki] - new_max);
+                    float weight = fast_expf(score_row[ki] - new_max);
                     sum_exps[i] += weight;
                     const float *v_row = V_tile + ki * head_dim;
                     for (int d = 0; d < head_dim; d++) {
