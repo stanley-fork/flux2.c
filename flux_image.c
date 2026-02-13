@@ -724,7 +724,7 @@ static flux_image *load_png(FILE *f) {
     const uint8_t expected[8] = {0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a};
     if (memcmp(sig, expected, 8) != 0) return NULL;
 
-    int width = 0, height = 0, color_type = 0;
+    int width = 0, height = 0, bit_depth = 0, color_type = 0, interlace = 0;
     uint8_t *idat_data = NULL;
     size_t idat_len = 0;
 
@@ -737,9 +737,11 @@ static flux_image *load_png(FILE *f) {
         if (strcmp(chunk_type, "IHDR") == 0) {
             width = read_be32(f);
             height = read_be32(f);
-            (void)fgetc(f);  /* bit_depth - skip */
+            bit_depth = fgetc(f);
             color_type = fgetc(f);
-            fseek(f, 3, SEEK_CUR);  /* Skip compression, filter, interlace */
+            (void)fgetc(f);  /* compression */
+            (void)fgetc(f);  /* filter */
+            interlace = fgetc(f);
             fseek(f, 4, SEEK_CUR);  /* Skip CRC */
         } else if (strcmp(chunk_type, "IDAT") == 0) {
             /* Accumulate IDAT chunks */
@@ -759,6 +761,18 @@ static flux_image *load_png(FILE *f) {
     }
 
     if (width == 0 || height == 0 || !idat_data) {
+        free(idat_data);
+        return NULL;
+    }
+
+    /* Only 8-bit non-interlaced PNGs are supported */
+    if (bit_depth != 8) {
+        fprintf(stderr, "PNG error: unsupported bit depth %d (only 8-bit supported)\n", bit_depth);
+        free(idat_data);
+        return NULL;
+    }
+    if (interlace != 0) {
+        fprintf(stderr, "PNG error: interlaced PNGs not supported\n");
         free(idat_data);
         return NULL;
     }

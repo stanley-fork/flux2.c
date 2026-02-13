@@ -508,6 +508,11 @@ static flux_image *vae_decode_gpu(flux_vae_t *vae, const float *latent,
 
     int ch_mult[4] = {1, 2, 4, 4};
 
+    /* Ensure work buffers are allocated (needed for CPU portions of GPU path) */
+    int out_H = latent_h * 16;
+    int out_W = latent_w * 16;
+    if (vae_ensure_work_buffers(vae, out_H, out_W) < 0) return NULL;
+
     /* Batch denormalize + unpatchify on CPU (small data, fast) */
     float *cpu_x = vae->work1;
     float *cpu_work = vae->work2;
